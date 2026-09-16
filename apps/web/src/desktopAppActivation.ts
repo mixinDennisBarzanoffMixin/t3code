@@ -34,6 +34,7 @@ export interface DesktopAppActivationDependencies {
   readonly openThread: (
     projectRef: ScopedProjectRef,
   ) => Promise<{ readonly threadId: ThreadId } | null>;
+  readonly registerPairing: (pairingUrl: string) => Promise<EnvironmentId>;
 }
 
 function failure(
@@ -45,7 +46,7 @@ function failure(
 }
 
 function desktopPlatformToEnvironmentOs(
-  platform: DesktopAppActivationRequest["platform"],
+  platform: Extract<DesktopAppActivationRequest, { readonly type: "open-workspace" }>["platform"],
 ): ExecutionEnvironmentPlatformOs {
   return platform === "win32" ? "windows" : platform;
 }
@@ -58,6 +59,25 @@ export async function handleDesktopAppActivationRequest(
   request: DesktopAppActivationRequest,
   dependencies: DesktopAppActivationDependencies,
 ): Promise<DesktopAppActivationResponse> {
+  if (request.type === "pair-environment") {
+    try {
+      const environmentId = await dependencies.registerPairing(request.pairingUrl);
+      return {
+        version: 1,
+        requestId: request.requestId,
+        ok: true,
+        type: "pair-environment",
+        environmentId,
+      };
+    } catch {
+      return failure(
+        request.requestId,
+        "pairing-failed",
+        "T3 Code could not pair the environment.",
+      );
+    }
+  }
+
   const target = dependencies.getTarget();
   if (target === null) {
     return failure(

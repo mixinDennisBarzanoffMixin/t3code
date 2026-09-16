@@ -1,4 +1,9 @@
-import { ProjectId, ThreadId, type DesktopAppActivationRequest } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ThreadId,
+  type DesktopAppActivationRequest,
+} from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { DesktopAppActivationBroker } from "./DesktopAppActivationBroker.ts";
@@ -126,5 +131,34 @@ describe("DesktopAppActivationBroker", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("serializes pairing requests through the renderer without exposing them in responses", async () => {
+    const send = vi.fn();
+    const broker = new DesktopAppActivationBroker({ requestTimeoutMs: 1_000, activate: vi.fn() });
+    const pairingRequest: DesktopAppActivationRequest = {
+      version: 1,
+      requestId: "request-pair",
+      type: "pair-environment",
+      pairingUrl: "https://remote.example.test/pair#token=one-time-secret",
+    };
+    broker.registerRenderer(send);
+
+    const response = broker.request(pairingRequest);
+    expect(send).toHaveBeenCalledWith(pairingRequest);
+    broker.complete({
+      version: 1,
+      requestId: pairingRequest.requestId,
+      ok: true,
+      type: "pair-environment",
+      environmentId: EnvironmentId.make("environment-paired"),
+    });
+
+    await expect(response).resolves.toMatchObject({
+      ok: true,
+      environmentId: "environment-paired",
+    });
+    expect(JSON.stringify(await response)).not.toContain("one-time-secret");
+    broker.close();
   });
 });

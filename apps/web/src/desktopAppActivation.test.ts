@@ -31,6 +31,7 @@ function dependencies(
     createProject: vi.fn(async () => createdProjectId),
     waitForProject: vi.fn(async () => undefined),
     openThread: vi.fn(async () => ({ threadId })),
+    registerPairing: vi.fn(async () => environmentId),
     ...overrides,
   };
 }
@@ -103,5 +104,49 @@ describe("desktop app activation", () => {
       message: "Project path is not available.",
     });
     expect(openThread).not.toHaveBeenCalled();
+  });
+
+  it("registers a pairing URL through the onboarding dependency", async () => {
+    const pairingUrl = "https://remote.example.test/pair#token=one-time-secret";
+    const registerPairing = vi.fn(async () => EnvironmentId.make("paired-environment"));
+
+    const response = await handleDesktopAppActivationRequest(
+      {
+        version: 1,
+        requestId: "request-pair",
+        type: "pair-environment",
+        pairingUrl,
+      },
+      dependencies({ registerPairing }),
+    );
+
+    expect(registerPairing).toHaveBeenCalledWith(pairingUrl);
+    expect(response).toEqual({
+      version: 1,
+      requestId: "request-pair",
+      ok: true,
+      type: "pair-environment",
+      environmentId: "paired-environment",
+    });
+  });
+
+  it("returns a sanitized pairing failure", async () => {
+    const pairingUrl = "https://remote.example.test/pair#token=one-time-secret";
+    const response = await handleDesktopAppActivationRequest(
+      {
+        version: 1,
+        requestId: "request-pair-failed",
+        type: "pair-environment",
+        pairingUrl,
+      },
+      dependencies({
+        registerPairing: vi.fn(async () => {
+          throw new Error(`Remote rejected ${pairingUrl}`);
+        }),
+      }),
+    );
+
+    expect(response).toMatchObject({ ok: false, code: "pairing-failed" });
+    expect(JSON.stringify(response)).not.toContain("one-time-secret");
   });
 });

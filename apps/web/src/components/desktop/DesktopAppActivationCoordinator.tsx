@@ -1,8 +1,12 @@
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import type { DesktopAppActivationRequest } from "@t3tools/contracts";
 import { useEffect, useEffectEvent, useRef } from "react";
 
 import { handleDesktopAppActivationRequest } from "../../desktopAppActivation";
+import { connectPairing } from "../../connection/onboarding";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { findProjectByPath, inferProjectTitleFromPath } from "../../lib/projectPaths";
 import { newProjectId } from "../../lib/utils";
@@ -16,6 +20,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 export function DesktopAppActivationCoordinator() {
   const primaryEnvironment = usePrimaryEnvironment();
   const createProject = useAtomCommand(projectEnvironment.create, { reportFailure: false });
+  const registerPairing = useAtomCommand(connectPairing, { reportFailure: false });
   const openThread = useNewThreadHandler();
   const queueRef = useRef(Promise.resolve());
   const activation = window.desktopBridge?.appActivation;
@@ -71,6 +76,13 @@ export function DesktopAppActivationCoordinator() {
         await waitForProject(projectRef);
       },
       openThread: (projectRef) => openThread(projectRef),
+      registerPairing: async (pairingUrl) => {
+        const result = await registerPairing({ pairingUrl });
+        if (result._tag === "Success") return result.value;
+        if (isAtomCommandInterrupted(result)) throw new Error("Pairing was interrupted.");
+        const cause = squashAtomCommandFailure(result);
+        throw cause instanceof Error ? cause : new Error("Pairing failed.");
+      },
     }),
   );
 

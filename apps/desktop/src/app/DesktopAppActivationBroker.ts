@@ -60,7 +60,9 @@ export class DesktopAppActivationBroker {
           failure(
             request.requestId,
             "request-timeout",
-            "The desktop app did not finish opening the project in time.",
+            request.type === "pair-environment"
+              ? "The desktop app did not finish pairing the environment in time."
+              : "The desktop app did not finish opening the project in time.",
           ),
         );
       }, this.#requestTimeoutMs);

@@ -3,6 +3,8 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeStream from "node:stream";
+import * as NodeUtil from "node:util";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
@@ -15,12 +17,18 @@ import {
 } from "@t3tools/shared/hostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { Command } from "effect/unstable/cli";
 import { afterEach, describe, expect, vi } from "vite-plus/test";
 
 import { makeCli } from "../bin.ts";
+import {
+  DesktopAppPairingInputError,
+  DesktopAppPairingUrlInput,
+  readPairingUrlFromStdin,
+} from "./app.ts";
 
 vi.mock("node:os", async (importOriginal) => {
   const os = await importOriginal<typeof import("node:os")>();
@@ -81,13 +89,21 @@ async function startFakeDesktop(input: {
       received.push(request);
       const response = input.reply
         ? input.reply(request)
-        : {
-            version: 1,
-            requestId: request.requestId,
-            ok: true,
-            projectId: "project-1",
-            threadId: `thread-${received.length}`,
-          };
+        : request.type === "pair-environment"
+          ? {
+              version: 1,
+              requestId: request.requestId,
+              ok: true,
+              type: "pair-environment",
+              environmentId: "environment-paired",
+            }
+          : {
+              version: 1,
+              requestId: request.requestId,
+              ok: true,
+              projectId: "project-1",
+              threadId: `thread-${received.length}`,
+            };
       socket.end(`${JSON.stringify(response)}\n`);
     });
   });
@@ -131,6 +147,114 @@ const withTempDirectory = <A, E, R>(
   );
 
 describe("t3 app", () => {
+  it("reads exactly one pairing URL without including invalid input in its error", async () => {
+    const secret = "one-time-secret";
+    await expect(
+      readPairingUrlFromStdin(
+        NodeStream.Readable.from([`https://remote.example.test/pair?token=${secret}\n`]),
+      ),
+    ).resolves.toBe(`https://remote.example.test/pair?token=${secret}`);
+    await expect(
+      readPairingUrlFromStdin(
+        NodeStream.Readable.from([
+          `https://remote.example.test/pair#token=${secret}\nsecond-line\n`,
+        ]),
+      ),
+    ).rejects.toMatchObject({
+      _tag: "DesktopAppPairingInputError",
+      message: "Expected exactly one valid pairing URL on standard input.",
+    });
+
+    try {
+      await readPairingUrlFromStdin(NodeStream.Readable.from([`not-a-url-${secret}\n`]));
+      throw new Error("Expected pairing URL validation to fail.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(DesktopAppPairingInputError);
+      expect(String(error)).not.toContain(secret);
+      expect(NodeUtil.inspect(error, { depth: 8 })).not.toContain(secret);
+    }
+  });
+
+  it.effect("sends a stdin pairing URL to the desktop and prints only sanitized success", () =>
+    withTempDirectory("t3-app-pair-test-", (root) =>
+      Effect.gen(function* () {
+        const baseDir = NodePath.join(root, "t3-home");
+        const pairingUrl =
+          "https://remote.example.test/pair#token=one-time-secret-never-print-this";
+        const output: ReadonlyArray<unknown>[] = [];
+        const testConsole = {
+          ...globalThis.console,
+          log: (...args: ReadonlyArray<unknown>) => output.push(args),
+        } satisfies Console.Console;
+        const desktop = yield* fakeDesktop({ baseDir });
+
+        yield* runCli(["app", "pair", "--url-stdin", "--base-dir", baseDir]).pipe(
+          Effect.provideService(DesktopAppPairingUrlInput, Effect.succeed(pairingUrl)),
+          Effect.provideService(Console.Console, testConsole),
+        );
+
+        expect(desktop.received).toHaveLength(1);
+        expect(desktop.received[0]).toMatchObject({ type: "pair-environment", pairingUrl });
+        expect(output.flat().map(String).join("\n")).toBe("Paired environment in T3 Code.");
+        expect(output.flat().map(String).join("\n")).not.toContain("one-time-secret");
+      }).pipe(Effect.scoped),
+    ),
+  );
+
+  it.effect("keeps a failed pairing URL out of CLI output and errors", () =>
+    withTempDirectory("t3-app-pair-failure-test-", (root) =>
+      Effect.gen(function* () {
+        const baseDir = NodePath.join(root, "t3-home");
+        const secret = "one-time-secret-never-report-this";
+        const pairingUrl = `https://remote.example.test/pair#token=${secret}`;
+        const output: ReadonlyArray<unknown>[] = [];
+        const testConsole = {
+          ...globalThis.console,
+          log: (...args: ReadonlyArray<unknown>) => output.push(args),
+          error: (...args: ReadonlyArray<unknown>) => output.push(args),
+        } satisfies Console.Console;
+        yield* fakeDesktop({
+          baseDir,
+          reply: (request) => ({
+            version: 1,
+            requestId: request.requestId,
+            ok: false,
+            code: "pairing-failed",
+            message: "T3 Code could not pair the environment.",
+          }),
+        });
+
+        const error = yield* runCli(["app", "pair", "--url-stdin", "--base-dir", baseDir]).pipe(
+          Effect.provideService(DesktopAppPairingUrlInput, Effect.succeed(pairingUrl)),
+          Effect.provideService(Console.Console, testConsole),
+          Effect.flip,
+        );
+
+        expect(error).toMatchObject({ _tag: "DesktopAppPairingFailedError" });
+        expect(String(error)).not.toContain(secret);
+        expect(NodeUtil.inspect(error, { depth: 8 })).not.toContain(secret);
+        expect(output.flat().map(String).join("\n")).not.toContain(secret);
+      }).pipe(Effect.scoped),
+    ),
+  );
+
+  it.effect("keeps `t3 app pair` as a workspace path without --url-stdin", () =>
+    withTempDirectory("t3-app-pair-path-test-", (root) =>
+      Effect.gen(function* () {
+        const baseDir = NodePath.join(root, "t3-home");
+        const desktop = yield* fakeDesktop({ baseDir });
+
+        yield* runCli(["app", "pair", "--base-dir", baseDir]);
+
+        expect(desktop.received).toHaveLength(1);
+        expect(desktop.received[0]).toMatchObject({
+          type: "open-workspace",
+          workspaceRoot: NodePath.join(yield* HostProcessWorkingDirectory, "pair"),
+        });
+      }).pipe(Effect.scoped),
+    ),
+  );
+
   it.effect("rejects SSH before it tries to reach a desktop app", () =>
     withTempDirectory("t3-app-ssh-test-", (root) =>
       Effect.gen(function* () {
@@ -198,11 +322,14 @@ describe("t3 app", () => {
         yield* runCli(["app"], { T3CODE_HOME: baseDir });
         yield* runCli(["app", explicitPath, "--base-dir", baseDir]);
 
-        expect(desktop.received.map((request) => request.workspaceRoot)).toEqual([
+        const openRequests = desktop.received.filter(
+          (request) => request.type === "open-workspace",
+        );
+        expect(openRequests.map((request) => request.workspaceRoot)).toEqual([
           workingDirectory,
           explicitPath,
         ]);
-        expect(desktop.received.every((request) => request.platform === platform)).toBe(true);
+        expect(openRequests.every((request) => request.platform === platform)).toBe(true);
       }).pipe(Effect.scoped),
     ),
   );

@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
+import type * as NodeStream from "node:stream";
 
 import {
   DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION,
@@ -11,6 +12,7 @@ import {
   type DesktopAppActivationRequest,
 } from "@t3tools/contracts";
 import { resolveDesktopAppControlAddress } from "@t3tools/shared/desktopAppControl";
+import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import {
   HostProcessPlatform,
   HostProcessUserId,
@@ -18,17 +20,19 @@ import {
 } from "@t3tools/shared/hostProcess";
 import * as Config from "effect/Config";
 import * as Console from "effect/Console";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { Argument, Command } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 import { baseDirFlag } from "./config.ts";
 
 const CLI_RESPONSE_TIMEOUT_MS = 17_000;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+const MAX_PAIRING_URL_BYTES = 16 * 1024;
 const isDesktopAppActivationResponse = Schema.is(DesktopAppActivationResponse);
 
 export class DesktopAppSshUnsupportedError extends Schema.TaggedError<DesktopAppSshUnsupportedError>()(
@@ -76,6 +80,69 @@ export class DesktopAppRequestFailedError extends Schema.TaggedError<DesktopAppR
     return `T3 Code could not open ${this.workspaceRoot} (${this.code}).`;
   }
 }
+
+export class DesktopAppPairingInputError extends Schema.TaggedError<DesktopAppPairingInputError>()(
+  "DesktopAppPairingInputError",
+  {},
+) {
+  override get message(): string {
+    return "Expected exactly one valid pairing URL on standard input.";
+  }
+}
+
+export class DesktopAppPairingFailedError extends Schema.TaggedError<DesktopAppPairingFailedError>()(
+  "DesktopAppPairingFailedError",
+  {
+    code: DesktopAppActivationErrorCode,
+    requestId: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `T3 Code could not pair the environment (${this.code}).`;
+  }
+}
+
+export async function readPairingUrlFromStdin(input: NodeStream.Readable): Promise<string> {
+  let value = "";
+  for await (const chunk of input) {
+    value += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    if (Buffer.byteLength(value, "utf8") > MAX_PAIRING_URL_BYTES) {
+      throw new DesktopAppPairingInputError({});
+    }
+  }
+
+  const withoutTerminator = value.endsWith("\r\n")
+    ? value.slice(0, -2)
+    : value.endsWith("\n")
+      ? value.slice(0, -1)
+      : value;
+  const pairingUrl = withoutTerminator.trim();
+  if (
+    pairingUrl.length === 0 ||
+    withoutTerminator.includes("\n") ||
+    withoutTerminator.includes("\r")
+  ) {
+    throw new DesktopAppPairingInputError({});
+  }
+
+  try {
+    resolveRemotePairingTarget({ pairingUrl });
+  } catch {
+    throw new DesktopAppPairingInputError({});
+  }
+  return pairingUrl;
+}
+
+export const DesktopAppPairingUrlInput = Context.Reference<
+  Effect.Effect<string, DesktopAppPairingInputError>
+>("@t3tools/server/cli/app/DesktopAppPairingUrlInput", {
+  defaultValue: () =>
+    Effect.tryPromise({
+      try: () => readPairingUrlFromStdin(process.stdin),
+      catch: () => new DesktopAppPairingInputError({}),
+    }),
+});
 
 function isDesktopPlatform(platform: NodeJS.Platform): platform is DesktopAppActivationPlatform {
   return platform === "darwin" || platform === "linux" || platform === "win32";
@@ -186,6 +253,7 @@ const appEnvironment = Config.all({
 const runAppCommand = Effect.fn("cli.app")(function* (flags: {
   readonly baseDir: Option.Option<string>;
   readonly workspaceRoot: Option.Option<string>;
+  readonly urlStdin: boolean;
 }) {
   const environment = yield* appEnvironment;
   const hostPlatform = yield* HostProcessPlatform;
@@ -200,9 +268,6 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
   const configuredBaseDir = Option.getOrUndefined(flags.baseDir) ?? environment.t3Home;
   const baseDir = yield* resolveBaseDir(configuredBaseDir);
   const allowDevFallback = Option.isNone(flags.baseDir) && !environment.t3Home?.trim();
-  const rawWorkspaceRoot =
-    Option.getOrUndefined(flags.workspaceRoot) ?? (yield* HostProcessWorkingDirectory);
-  const workspaceRoot = path.resolve(yield* expandHomePath(rawWorkspaceRoot));
   const userId = yield* HostProcessUserId;
   const resolveAddress = (stateSubdirectory: "userdata" | "dev") =>
     resolveDesktopAppControlAddress({
@@ -212,13 +277,29 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
       userId,
       joinPath: path.join,
     }).address;
-  const request: DesktopAppActivationRequest = {
-    version: DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION,
-    requestId: NodeCrypto.randomUUID(),
-    type: "open-workspace",
-    workspaceRoot,
-    platform: hostPlatform,
-  };
+  const pairFromStdin = flags.urlStdin && Option.getOrUndefined(flags.workspaceRoot) === "pair";
+  if (flags.urlStdin && !pairFromStdin) {
+    return yield* new DesktopAppPairingInputError({});
+  }
+  const pairingUrlInput = yield* DesktopAppPairingUrlInput;
+  const request: DesktopAppActivationRequest = pairFromStdin
+    ? {
+        version: DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION,
+        requestId: NodeCrypto.randomUUID(),
+        type: "pair-environment",
+        pairingUrl: yield* pairingUrlInput,
+      }
+    : {
+        version: DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION,
+        requestId: NodeCrypto.randomUUID(),
+        type: "open-workspace",
+        workspaceRoot: path.resolve(
+          yield* expandHomePath(
+            Option.getOrUndefined(flags.workspaceRoot) ?? (yield* HostProcessWorkingDirectory),
+          ),
+        ),
+        platform: hostPlatform,
+      };
   const address = resolveAddress("userdata");
   const fallbackAddress = allowDevFallback ? resolveAddress("dev") : undefined;
 
@@ -233,26 +314,59 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
       new DesktopAppUnreachableError({
         candidateAddresses: fallbackAddress === undefined ? [address] : [address, fallbackAddress],
         requestId: request.requestId,
-        workspaceRoot,
+        workspaceRoot:
+          request.type === "open-workspace" ? request.workspaceRoot : "pairing request",
         cause,
       }),
   });
   if (!response.ok) {
+    if (request.type === "pair-environment") {
+      return yield* new DesktopAppPairingFailedError({
+        code: response.code,
+        requestId: response.requestId,
+        cause: response,
+      });
+    }
     return yield* new DesktopAppRequestFailedError({
       code: response.code,
       requestId: response.requestId,
-      workspaceRoot,
+      workspaceRoot: request.workspaceRoot,
       cause: response,
     });
   }
 
-  yield* Console.log(`Opened ${workspaceRoot} in T3 Code.`);
+  if (request.type === "pair-environment") {
+    if (!("environmentId" in response)) {
+      return yield* new DesktopAppPairingFailedError({
+        code: "internal-error",
+        requestId: response.requestId,
+        cause: new Error("The desktop app returned the wrong success response."),
+      });
+    }
+    yield* Console.log("Paired environment in T3 Code.");
+    return;
+  }
+  if (!("projectId" in response)) {
+    return yield* new DesktopAppRequestFailedError({
+      code: "internal-error",
+      requestId: response.requestId,
+      workspaceRoot: request.workspaceRoot,
+      cause: new Error("The desktop app returned the wrong success response."),
+    });
+  }
+  yield* Console.log(`Opened ${request.workspaceRoot} in T3 Code.`);
 });
 
 export const appCommand = Command.make("app", {
   baseDir: baseDirFlag,
+  urlStdin: Flag.boolean("url-stdin").pipe(
+    Flag.withDescription("Read one pairing URL from standard input. Use with the `pair` path."),
+    Flag.withDefault(false),
+  ),
   workspaceRoot: Argument.string("path").pipe(
-    Argument.withDescription("Project directory. Default: current directory."),
+    Argument.withDescription(
+      "Project directory. Default: current directory. Use `pair --url-stdin` for secure pairing.",
+    ),
     Argument.optional,
   ),
 }).pipe(
