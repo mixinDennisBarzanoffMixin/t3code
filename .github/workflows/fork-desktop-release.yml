@@ -116,7 +116,7 @@ jobs:
         run: vp run build:desktop
 
       - name: Verify fork SSH runtime origin is embedded
-        run: rg --fixed-strings "$T3CODE_SSH_RELEASE_BASE_URL" apps/desktop/dist-electron
+        run: grep --recursive --fixed-strings "$T3CODE_SSH_RELEASE_BASE_URL" apps/desktop/dist-electron
 
       - name: Upload shared bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
