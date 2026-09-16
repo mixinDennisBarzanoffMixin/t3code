@@ -219,7 +219,7 @@ jobs:
               # use Oxlint, so remove only that workspace hook inside this
               # disposable Alpine checkout while preserving dependency build
               # scripts such as node-pty's native musl rebuild.
-              node -e '\''const fs = require("node:fs"); const p = require("./package.json"); delete p.scripts.prepare; fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\\n")'\''
+              node -e "const fs = require('node:fs'); const p = require('./package.json'); delete p.scripts.prepare; fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\\n')"
               pnpm install --frozen-lockfile --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
               node scripts/update-release-package-versions.ts "$RELEASE_VERSION"
               pnpm exec node apps/server/scripts/cli.ts build-exe --verbose
