@@ -212,7 +212,7 @@ jobs:
             --env RELEASE_VERSION \
             node:26.8.2-alpine \
             sh -euxc '
-              apk add --no-cache bash cargo g++ git linux-headers make musl-dev python3
+              apk add --no-cache bash cargo g++ git linux-headers make musl-dev python3 tar
               npm install --global pnpm@11.10.0
               # The root prepare hook patches the packaged Oxlint binary, which
               # intentionally has no musl target. Runtime packaging does not
