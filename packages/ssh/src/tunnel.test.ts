@@ -491,7 +491,7 @@ describe("ssh tunnel scripts", () => {
   });
 
   it.effect.each(["successful stop", "failed stop"] as const)(
-    "closes the tunnel scope and starts fresh after a %s",
+    "explicitly disconnects the remote server and starts fresh after a %s",
     (mode) => {
       const spawnedCommands: Array<ReadonlyArray<string>> = [];
       let tunnelKillCount = 0;
@@ -582,12 +582,63 @@ describe("ssh tunnel scripts", () => {
         Effect.andThen(
           Effect.sync(() => {
             assert.equal(tunnelKillCount, 2);
-            assert.equal(stopCommandCount, mode === "failed stop" ? 3 : 2);
+            assert.equal(stopCommandCount, mode === "failed stop" ? 2 : 1);
           }),
         ),
       );
     },
   );
+
+  it.effect("keeps the remote server alive when the desktop manager shuts down", () => {
+    let tunnelKillCount = 0;
+    let stopCommandCount = 0;
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.sync(() => {
+        const args = commandArgs(command);
+        if (args.includes("-N")) {
+          return makeRunningProcess(() => {
+            tunnelKillCount += 1;
+          });
+        }
+        if (args.includes("sh") && args.includes("--")) {
+          return makeSuccessfulProcess('{"remotePort":3773}\n');
+        }
+        if (args.includes("sh")) {
+          stopCommandCount += 1;
+          return makeSuccessfulProcess('{"stopped":true}\n');
+        }
+        return makeSuccessfulProcess("\n");
+      }),
+    );
+    const layer = Layer.mergeAll(
+      NodeServices.layer,
+      Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Layer.succeed(HttpClient.HttpClient, testHttpClient),
+      Layer.succeed(NetService.NetService, testNetService),
+      SshPasswordPrompt.disabledLayer,
+      SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(ARCHIVE) }),
+    );
+    const target = {
+      alias: "devbox",
+      hostname: "devbox.example.com",
+      username: "julius",
+      port: 2222,
+    } as const;
+
+    return Effect.gen(function* () {
+      const manager = yield* SshEnvironmentManager;
+      yield* manager.ensureEnvironment(target);
+    }).pipe(
+      Effect.provide(layer),
+      Effect.scoped,
+      Effect.andThen(
+        Effect.sync(() => {
+          assert.equal(tunnelKillCount, 1);
+          assert.equal(stopCommandCount, 0);
+        }),
+      ),
+    );
+  });
 
   it.effect.each(["local tunnel", "remote server"] as const)(
     "waits for %s shutdown before reconnecting the same target",

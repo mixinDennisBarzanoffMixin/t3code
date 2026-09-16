@@ -228,8 +228,13 @@ export const resolveSshPasswordPrompt = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.sshEnvironment.resolvePasswordPrompt")(function* ({
     requestId,
     password,
+    rememberPassword,
   }) {
     const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
-    yield* prompts.resolve({ requestId, password });
+    yield* prompts.resolve({
+      requestId,
+      password,
+      ...(rememberPassword === undefined ? {} : { rememberPassword }),
+    });
   }),
 });

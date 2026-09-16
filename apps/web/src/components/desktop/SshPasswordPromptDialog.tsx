@@ -2,6 +2,7 @@ import type { DesktopSshPasswordPromptRequest } from "@t3tools/contracts";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
   DialogDescription,
@@ -69,6 +70,7 @@ function ActiveSshPasswordPrompt({
 }) {
   const [password, setPassword] = useState("");
   const [isResponding, setIsResponding] = useState(false);
+  const [rememberPassword, setRememberPassword] = useState(true);
   const [now, setNow] = useState(() => Date.now());
   const [responseError, setResponseError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -119,7 +121,11 @@ function ActiveSshPasswordPrompt({
     setIsResponding(true);
     setResponseError(null);
     try {
-      await window.desktopBridge?.resolveSshPasswordPrompt(requestId, nextPassword);
+      await window.desktopBridge?.resolveSshPasswordPrompt(
+        requestId,
+        nextPassword,
+        nextPassword === null ? false : rememberPassword,
+      );
       onRemove(requestId);
     } catch (error) {
       if (nextPassword === null) {
@@ -197,12 +203,20 @@ function ActiveSshPasswordPrompt({
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
               />
+              <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Checkbox
+                  checked={rememberPassword}
+                  disabled={isResponding || isExpired}
+                  onCheckedChange={(checked) => setRememberPassword(checked === true)}
+                />
+                Remember in the system keychain
+              </label>
             </div>
             {visibleResponseError ? (
               <p className="text-sm text-destructive">{visibleResponseError}</p>
             ) : (
               <p className="text-sm text-muted-foreground">
-                Use SSH keys to avoid repeated password prompts on new SSH sessions.
+                Saved passwords are encrypted by your operating system and reused after restart.
               </p>
             )}
           </form>

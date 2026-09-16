@@ -106,8 +106,14 @@ function makeElectronWindowLayer(window: ReturnType<typeof makeTestWindow>["wind
   );
 }
 
-function makeLayer(window: ReturnType<typeof makeTestWindow>["window"]) {
-  return DesktopSshPasswordPrompts.layer({ passwordPromptTimeoutMs: 1_000 }).pipe(
+function makeLayer(
+  window: ReturnType<typeof makeTestWindow>["window"],
+  options: DesktopSshPasswordPrompts.DesktopSshPasswordPromptsOptions = {},
+) {
+  return DesktopSshPasswordPrompts.layer({
+    passwordPromptTimeoutMs: 1_000,
+    ...options,
+  }).pipe(
     Layer.provide(makeElectronWindowLayer(window)),
     Layer.provide(NodeServices.layer),
     Layer.provideMerge(TestClock.layer()),
@@ -143,6 +149,119 @@ describe("DesktopSshPasswordPrompts", () => {
       yield* prompts.resolve({ requestId: request.requestId, password: "secret" });
       assert.equal(yield* Fiber.join(fiber), "secret");
     }).pipe(Effect.provide(makeLayer(testWindow.window)), Effect.scoped);
+  });
+
+  it.effect("presents concurrent password requests one at a time", () => {
+    const testWindow = makeTestWindow();
+
+    return Effect.gen(function* () {
+      const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
+      const first = yield* prompts
+        .request({
+          destination: "first",
+          username: "julius",
+          prompt: "Enter the SSH password.",
+          attempt: 1,
+        })
+        .pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      const second = yield* prompts
+        .request({
+          destination: "second",
+          username: "julius",
+          prompt: "Enter the SSH password.",
+          attempt: 1,
+        })
+        .pipe(Effect.forkScoped);
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal(testWindow.sentMessages.length, 1);
+      const firstRequest = testWindow.sentMessages[0]?.args[0] as
+        | { readonly requestId: string }
+        | undefined;
+      assert.ok(firstRequest);
+      yield* prompts.resolve({ requestId: firstRequest.requestId, password: "first-secret" });
+      assert.equal(yield* Fiber.join(first), "first-secret");
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal(testWindow.sentMessages.length, 2);
+      const secondRequest = testWindow.sentMessages[1]?.args[0] as
+        | { readonly requestId: string }
+        | undefined;
+      assert.ok(secondRequest);
+      yield* prompts.resolve({ requestId: secondRequest.requestId, password: "second-secret" });
+      assert.equal(yield* Fiber.join(second), "second-secret");
+    }).pipe(Effect.provide(makeLayer(testWindow.window)), Effect.scoped);
+  });
+
+  it.effect("uses a remembered password without opening a renderer prompt", () => {
+    const testWindow = makeTestWindow();
+
+    return Effect.gen(function* () {
+      const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
+      const password = yield* prompts.request({
+        destination: "devbox",
+        username: "julius",
+        prompt: "Enter the SSH password.",
+        attempt: 1,
+      });
+
+      assert.equal(password, "remembered-secret");
+      assert.deepEqual(testWindow.sentMessages, []);
+    }).pipe(
+      Effect.provide(
+        makeLayer(testWindow.window, {
+          loadRememberedPassword: async () => "remembered-secret",
+        }),
+      ),
+      Effect.scoped,
+    );
+  });
+
+  it.effect("saves an accepted password when remembering is requested", () => {
+    const testWindow = makeTestWindow();
+    const saved: Array<{ destination: string; username: string | null; password: string }> = [];
+
+    return Effect.gen(function* () {
+      const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
+      const fiber = yield* prompts
+        .request({
+          destination: "devbox",
+          username: "julius",
+          prompt: "Enter the SSH password.",
+          attempt: 2,
+        })
+        .pipe(Effect.forkScoped);
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      const request = testWindow.sentMessages[0]?.args[0] as
+        | { readonly requestId: string }
+        | undefined;
+      assert.ok(request);
+      yield* prompts.resolve({
+        requestId: request.requestId,
+        password: "new-secret",
+        rememberPassword: true,
+      });
+
+      assert.equal(yield* Fiber.join(fiber), "new-secret");
+      assert.deepEqual(saved, [
+        { destination: "devbox", username: "julius", password: "new-secret" },
+      ]);
+    }).pipe(
+      Effect.provide(
+        makeLayer(testWindow.window, {
+          rememberPassword: async (input) => {
+            saved.push(input);
+          },
+        }),
+      ),
+      Effect.scoped,
+    );
   });
 
   it.effect("times out pending renderer prompts with a typed error", () => {

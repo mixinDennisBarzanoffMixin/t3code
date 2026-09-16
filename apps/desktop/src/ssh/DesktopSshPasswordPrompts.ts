@@ -11,6 +11,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { SSH_PASSWORD_PROMPT_CHANNEL } from "../ipc/channels.ts";
@@ -151,6 +152,15 @@ export class DesktopSshPromptExpiredError extends Schema.TaggedError<DesktopSshP
   }
 }
 
+export class DesktopSshPasswordKeyringError extends Schema.TaggedError<DesktopSshPasswordKeyringError>()(
+  "DesktopSshPasswordKeyringError",
+  {
+    destination: Schema.String,
+    operation: Schema.Literals(["load", "save"]),
+    cause: Schema.Defect(),
+  },
+) {}
+
 export type DesktopSshPasswordPromptRequestError =
   | DesktopSshPromptRequestIdGenerationError
   | DesktopSshPromptWindowUnavailableError
@@ -195,11 +205,60 @@ export class DesktopSshPasswordPrompts extends Context.Service<
 interface PendingSshPasswordPrompt {
   readonly requestId: string;
   readonly destination: string;
+  readonly username: string | null;
   readonly deferred: Deferred.Deferred<string, DesktopSshPasswordPromptRequestError>;
 }
 
 export interface DesktopSshPasswordPromptsOptions {
   readonly passwordPromptTimeoutMs?: number;
+  readonly loadRememberedPassword?: (input: {
+    readonly destination: string;
+    readonly username: string | null;
+  }) => Promise<string | null>;
+  readonly rememberPassword?: (input: {
+    readonly destination: string;
+    readonly username: string | null;
+    readonly password: string;
+  }) => Promise<void>;
+}
+
+const SSH_PASSWORD_KEYRING_SERVICE = "T3 Code SSH";
+
+function sshPasswordKeyringAccount(input: {
+  readonly destination: string;
+  readonly username: string | null;
+}): string {
+  return `${input.username ?? ""}@${input.destination}`;
+}
+
+export async function loadRememberedPassword(input: {
+  readonly destination: string;
+  readonly username: string | null;
+}): Promise<string | null> {
+  const Keyring = await import("@napi-rs/keyring");
+  try {
+    return new Keyring.Entry(
+      SSH_PASSWORD_KEYRING_SERVICE,
+      sshPasswordKeyringAccount(input),
+    ).getPassword();
+  } catch (cause) {
+    const message = String((cause as { message?: unknown } | undefined)?.message ?? "");
+    if (/no (matching )?entry|not found/i.test(message)) {
+      return null;
+    }
+    throw cause;
+  }
+}
+
+export async function rememberPassword(input: {
+  readonly destination: string;
+  readonly username: string | null;
+  readonly password: string;
+}): Promise<void> {
+  const Keyring = await import("@napi-rs/keyring");
+  new Keyring.Entry(SSH_PASSWORD_KEYRING_SERVICE, sshPasswordKeyringAccount(input)).setPassword(
+    input.password,
+  );
 }
 
 const removePending = (
@@ -229,6 +288,7 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const crypto = yield* Crypto.Crypto;
   const pendingRef = yield* Ref.make(new Map<string, PendingSshPasswordPrompt>());
+  const presentationLock = Semaphore.makeUnsafe(1);
   const passwordPromptTimeoutMs =
     options.passwordPromptTimeoutMs ?? DEFAULT_SSH_PASSWORD_PROMPT_TIMEOUT_MS;
 
@@ -278,12 +338,64 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
       return;
     }
 
+    if (input.rememberPassword === true && options.rememberPassword !== undefined) {
+      yield* Effect.tryPromise({
+        try: () =>
+          options.rememberPassword!({
+            destination: entry.destination,
+            username: entry.username,
+            password: input.password!,
+          }),
+        catch: (cause) =>
+          new DesktopSshPasswordKeyringError({
+            destination: entry.destination,
+            operation: "save",
+            cause,
+          }),
+      }).pipe(
+        Effect.tapError((cause) =>
+          Effect.logWarning("ssh.auth.passwordRemember.failed", {
+            destination: entry.destination,
+            cause,
+          }),
+        ),
+        Effect.ignore,
+      );
+    }
+
     yield* Deferred.succeed(entry.deferred, input.password).pipe(Effect.asVoid);
   });
 
-  const request: DesktopSshPasswordPrompts["Service"]["request"] = Effect.fn(
-    "desktop.sshPasswordPrompts.request",
+  const requestUnserialized: DesktopSshPasswordPrompts["Service"]["request"] = Effect.fn(
+    "desktop.sshPasswordPrompts.requestUnserialized",
   )(function* (input) {
+    if (input.attempt === 1 && options.loadRememberedPassword !== undefined) {
+      const remembered = yield* Effect.tryPromise({
+        try: () =>
+          options.loadRememberedPassword!({
+            destination: input.destination,
+            username: input.username,
+          }),
+        catch: (cause) =>
+          new DesktopSshPasswordKeyringError({
+            destination: input.destination,
+            operation: "load",
+            cause,
+          }),
+      }).pipe(
+        Effect.tapError((cause) =>
+          Effect.logWarning("ssh.auth.passwordRemember.loadFailed", {
+            destination: input.destination,
+            cause,
+          }),
+        ),
+        Effect.option,
+      );
+      if (Option.isSome(remembered) && remembered.value !== null) {
+        return remembered.value;
+      }
+    }
+
     const window = yield* electronWindow.main;
     if (Option.isNone(window)) {
       return yield* new DesktopSshPromptWindowUnavailableError({
@@ -335,6 +447,7 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
     const pending: PendingSshPasswordPrompt = {
       requestId,
       destination: input.destination,
+      username: input.username,
       deferred,
     };
     yield* Ref.update(pendingRef, (entries) => new Map(entries).set(requestId, pending));
@@ -463,6 +576,13 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
       }).pipe(Effect.catch(preferSubmittedPassword));
     }).pipe(Effect.ensuring(cleanup));
   });
+
+  // Saved SSH environments reconnect concurrently on startup. Presenting all
+  // password requests at once starts every expiry timer before the user can
+  // answer the first dialog and causes a prompt storm. Give each request the
+  // full interaction window by presenting exactly one at a time.
+  const request: DesktopSshPasswordPrompts["Service"]["request"] = (input) =>
+    presentationLock.withPermits(1)(requestUnserialized(input));
 
   return DesktopSshPasswordPrompts.of({
     request,

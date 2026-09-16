@@ -136,7 +136,12 @@ const desktopFoundationLayer = Layer.mergeAll(
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
 const desktopSshLayer = desktopSshEnvironmentLayer.pipe(
-  Layer.provideMerge(DesktopSshPasswordPrompts.layer()),
+  Layer.provideMerge(
+    DesktopSshPasswordPrompts.layer({
+      loadRememberedPassword: DesktopSshPasswordPrompts.loadRememberedPassword,
+      rememberPassword: DesktopSshPasswordPrompts.rememberPassword,
+    }),
+  ),
 );
 
 const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(

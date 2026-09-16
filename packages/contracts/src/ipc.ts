@@ -545,6 +545,7 @@ export const DesktopSshBearerBootstrapInputSchema = Schema.Struct({
 export const DesktopSshPasswordPromptResolutionInputSchema = Schema.Struct({
   requestId: Schema.String,
   password: Schema.NullOr(Schema.String),
+  rememberPassword: Schema.optionalKey(Schema.Boolean),
 });
 
 export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
@@ -1273,7 +1274,11 @@ export interface DesktopBridge {
     bearerToken: string,
   ) => Promise<AuthWebSocketTicketResult>;
   onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
-  resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
+  resolveSshPasswordPrompt: (
+    requestId: string,
+    password: string | null,
+    rememberPassword?: boolean,
+  ) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
   setTailscaleServeEnabled: (input: {
