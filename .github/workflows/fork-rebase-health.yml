@@ -19,10 +19,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      # Manual checkout avoids actions/checkout's post-job submodule cleanup,
+      # which trips over the intentionally orphaned gitlinks in .repos.
       - name: Checkout fork main
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
 
       - id: rebase
         name: Dry-run the real rebase
