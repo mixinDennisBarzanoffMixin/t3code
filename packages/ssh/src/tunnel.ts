@@ -243,7 +243,12 @@ function applyScriptPlaceholders(
 ): string {
   let result = template;
   for (const [token, value] of Object.entries(replacements)) {
-    result = result.replaceAll(`@@${token}@@`, value);
+    // A string replacement interprets `$` patterns (`$$`, `$&`, `$'`, ...).
+    // These replacements are shell/JavaScript source, so that silently
+    // corrupts nested scripts; for example a shell PID expression (`$$`)
+    // became a literal `$` in the generated remote installer. A replacer
+    // callback inserts the source byte-for-byte.
+    result = result.replaceAll(`@@${token}@@`, () => value);
   }
   return result;
 }
