@@ -2689,6 +2689,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      // Fork and preview builds intentionally run without Developer ID
+      // credentials. Give those bundles a complete ad-hoc signature instead
+      // of leaving Electron's nested helpers partially linker-signed; the
+      // latter produces an app that fails `codesign --verify --deep` even
+      // after the user clears quarantine. Ad-hoc signing still shows the
+      // expected Gatekeeper warning and is never a substitute for notarizing
+      // a public release.
+      ...(!signed ? { identity: "-", hardenedRuntime: false } : {}),
       extendInfo: {
         NSScreenCaptureUsageDescription:
           "T3 Code captures the active window when you use the window capture shortcut.",

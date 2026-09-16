@@ -1,0 +1,150 @@
+name: Fork rebase health
+
+on:
+  schedule:
+    - cron: "23 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: fork-rebase-health
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Test rebase onto upstream main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - id: rebase
+        name: Dry-run the real rebase
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          git fetch --no-tags upstream main
+
+          behind="$(git rev-list --count HEAD..upstream/main)"
+          ahead="$(git rev-list --count upstream/main..HEAD)"
+          upstream_sha="$(git rev-parse upstream/main)"
+          {
+            echo "behind=$behind"
+            echo "ahead=$ahead"
+            echo "upstream_sha=$upstream_sha"
+          } >> "$GITHUB_OUTPUT"
+
+          git config user.name "fleet rebase health"
+          git config user.email "fleet-rebase-health@users.noreply.github.com"
+
+          set +e
+          output="$(git rebase upstream/main 2>&1)"
+          status=$?
+          set -e
+
+          if (( status == 0 )); then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+            echo "conflicts=" >> "$GITHUB_OUTPUT"
+          else
+            conflicts="$(git diff --name-only --diff-filter=U | paste -sd, -)"
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "conflicts=$conflicts" >> "$GITHUB_OUTPUT"
+            git rebase --abort || true
+          fi
+
+          {
+            echo "### Fork rebase health"
+            echo
+            echo "- Upstream commits not yet incorporated: $behind"
+            echo "- Fork-only commits: $ahead"
+            echo "- Rebase clean: $([[ $status == 0 ]] && echo yes || echo no)"
+            if [[ -n "${conflicts:-}" ]]; then
+              echo "- Conflicting files: \`$conflicts\`"
+            fi
+            echo
+            echo '<details><summary>git rebase output</summary>'
+            echo
+            echo '```text'
+            printf '%s\n' "$output"
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Maintain conflict issue
+        if: always() && steps.rebase.outputs.healthy != ''
+        uses: actions/github-script@v8
+        env:
+          HEALTHY: ${{ steps.rebase.outputs.healthy }}
+          BEHIND: ${{ steps.rebase.outputs.behind }}
+          UPSTREAM_SHA: ${{ steps.rebase.outputs.upstream_sha }}
+          CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
+        with:
+          script: |
+            const marker = "<!-- fleet-upstream-rebase-health -->";
+            const title = "Fork no longer rebases cleanly onto upstream";
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "all",
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => !issue.pull_request && issue.body?.includes(marker));
+            const healthy = process.env.HEALTHY === "true";
+
+            if (healthy) {
+              if (existing?.state === "open") {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  body: `Rebase health recovered against upstream \`${process.env.UPSTREAM_SHA?.slice(0, 9)}\`.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  state: "closed",
+                });
+              }
+              return;
+            }
+
+            const body = [
+              marker,
+              "The weekly dry-run can no longer rebase the fleet fork onto `pingdotgg/t3code:main`.",
+              "",
+              `- Upstream SHA: \`${process.env.UPSTREAM_SHA}\``,
+              `- Upstream commits pending: ${process.env.BEHIND}`,
+              `- Conflicting files: \`${process.env.CONFLICTS || "not reported"}\``,
+              "",
+              "Resolve this before cutting the next fleet desktop release. No source branch or release was changed automatically.",
+            ].join("\n");
+
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                title,
+                body,
+                state: "open",
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }
+
+      - name: Fail when the rebase conflicts
+        if: steps.rebase.outputs.healthy == 'false'
+        run: exit 1
