@@ -45,8 +45,10 @@ import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64"]);
+const BuildLibc = Schema.Literals(["glibc", "musl"]);
 type BuildPlatform = typeof BuildPlatform.Type;
 type BuildArch = typeof BuildArch.Type;
+type BuildLibc = typeof BuildLibc.Type;
 
 const WorkspaceConfig = Schema.Struct({
   catalog: Schema.optional(Schema.Record(Schema.String, Schema.String)),
@@ -92,19 +94,33 @@ export class CliArchiveInputMissingError extends Schema.TaggedError<CliArchiveIn
 }
 
 /** Platform/arch pair as it appears in archive names and `process.platform`/`process.arch`. */
-export function cliArchivePlatformKey(platform: BuildPlatform, arch: BuildArch): string {
+export function cliArchivePlatformKey(
+  platform: BuildPlatform,
+  arch: BuildArch,
+  libc?: BuildLibc,
+): string {
   const nodePlatform = platform === "mac" ? "darwin" : platform === "win" ? "win32" : "linux";
-  return `${nodePlatform}-${arch}`;
+  return `${nodePlatform}-${arch}${platform === "linux" && libc === "musl" ? "-musl" : ""}`;
 }
 
-export function cliArchiveStem(version: string, platform: BuildPlatform, arch: BuildArch): string {
-  return `t3-${version}-${cliArchivePlatformKey(platform, arch)}`;
+export function cliArchiveStem(
+  version: string,
+  platform: BuildPlatform,
+  arch: BuildArch,
+  libc?: BuildLibc,
+): string {
+  return `t3-${version}-${cliArchivePlatformKey(platform, arch, libc)}`;
 }
 
-export function cliArchiveFileName(version: string, platform: BuildPlatform, arch: BuildArch) {
+export function cliArchiveFileName(
+  version: string,
+  platform: BuildPlatform,
+  arch: BuildArch,
+  libc?: BuildLibc,
+) {
   // gzip rather than xz: GNU tar needs an external xz binary for -J, which
   // minimal hosts lack, while every tar (and Node's zlib) handles gzip alone.
-  return `${cliArchiveStem(version, platform, arch)}.${platform === "win" ? "zip" : "tar.gz"}`;
+  return `${cliArchiveStem(version, platform, arch, libc)}.${platform === "win" ? "zip" : "tar.gz"}`;
 }
 
 /** The bsdtar Windows ships in System32; resolves regardless of which tar is first on PATH. */
@@ -152,6 +168,7 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
   readonly stageDir: string;
   readonly platform: BuildPlatform;
   readonly arch: BuildArch;
+  readonly libc?: BuildLibc;
   readonly version: string;
 }) {
   const fs = yield* FileSystem.FileSystem;
@@ -172,9 +189,19 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
       hint: "The archive stages fff's platform binary from this version.",
     });
   }
+  const fffNativeDependencies = resolveFffNativeDependencies(
+    input.platform,
+    input.arch,
+    fffNodeVersion,
+  );
   const dependencies = {
     ...selectCliRuntimeExternalDependencies(serverDependencies),
-    ...resolveFffNativeDependencies(input.platform, input.arch, fffNodeVersion),
+    ...Object.fromEntries(
+      Object.entries(fffNativeDependencies).filter(([name]) => {
+        if (input.platform !== "linux" || input.libc === undefined) return true;
+        return name.endsWith(input.libc === "musl" ? "-musl" : "-gnu");
+      }),
+    ),
   };
   const patchedDependencies = createStagePatchedDependencies(
     workspace.patchedDependencies ?? {},
@@ -201,6 +228,15 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
         patchedDependencies,
         overrides: resolveCatalogDependencies(workspace.overrides ?? {}, catalog, "apps/server"),
       }),
+      ...(input.platform === "linux" && input.libc
+        ? {
+            supportedArchitectures: {
+              os: ["linux"],
+              cpu: [input.arch],
+              libc: [input.libc],
+            },
+          }
+        : {}),
       nodeLinker: "hoisted",
     }),
   );
@@ -459,6 +495,7 @@ const signWindowsExecutable = Effect.fn("signWindowsExecutable")(function* (
 const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   readonly platform: BuildPlatform;
   readonly arch: BuildArch;
+  readonly libc?: BuildLibc;
   readonly version: string;
   readonly outputDir: string;
   readonly resourceMonitorDir: Option.Option<string>;
@@ -500,7 +537,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     "Build the resource monitor or pass --resource-monitor-dir.",
   );
 
-  const stem = cliArchiveStem(input.version, input.platform, input.arch);
+  const stem = cliArchiveStem(input.version, input.platform, input.arch, input.libc);
   const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-archive-" });
   const contentDir = path.join(stageRoot, stem);
   yield* fs.makeDirectory(contentDir, { recursive: true });
@@ -514,6 +551,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     stageDir: contentDir,
     platform: input.platform,
     arch: input.arch,
+    ...(input.libc ? { libc: input.libc } : {}),
     version: input.version,
   });
 
@@ -530,7 +568,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   yield* fs.makeDirectory(input.outputDir, { recursive: true });
   const archivePath = path.join(
     input.outputDir,
-    cliArchiveFileName(input.version, input.platform, input.arch),
+    cliArchiveFileName(input.version, input.platform, input.arch, input.libc),
   );
   yield* fs.remove(archivePath, { force: true });
   if (input.platform === "win") {
@@ -569,6 +607,12 @@ const command = Command.make(
   {
     platform: Flag.choice("platform", BuildPlatform.literals),
     arch: Flag.choice("arch", BuildArch.literals),
+    libc: Flag.choice("libc", BuildLibc.literals).pipe(
+      Flag.withDescription(
+        "Linux libc ABI for the archive. Defaults to glibc; musl adds -musl to the filename.",
+      ),
+      Flag.optional,
+    ),
     version: Flag.string("version").pipe(
       Flag.withDescription("Release version for the archive name."),
     ),
@@ -580,7 +624,11 @@ const command = Command.make(
       Flag.optional,
     ),
   },
-  (input) => buildCliArchive(input).pipe(Effect.scoped),
+  ({ libc, ...input }) =>
+    buildCliArchive({
+      ...input,
+      ...(Option.isSome(libc) ? { libc: libc.value } : {}),
+    }).pipe(Effect.scoped),
 ).pipe(Command.withDescription("Package the t3 single-executable into a per-platform archive."));
 
 if (import.meta.main) {

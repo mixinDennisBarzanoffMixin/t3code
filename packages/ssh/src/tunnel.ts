@@ -508,7 +508,27 @@ if ! t3_runtime_ready; then
     x86_64 | amd64) T3_ARCH="x64" ;;
     *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -m)" >&2; exit 1 ;;
   esac
-  T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"
+  # The ordinary Linux archive embeds glibc. Alpine and other musl systems
+  # need a separately built SEA executable and native-addon tree: a glibc
+  # binary cannot be made compatible by renaming the archive. Prefer ldd's
+  # explicit identity, with the dynamic loader as a fallback for minimal
+  # images whose ldd is absent or unusually terse.
+  T3_LIBC_SUFFIX=""
+  if [ "$T3_PLATFORM" = "linux" ]; then
+    T3_LDD_VERSION="$(ldd --version 2>&1 || true)"
+    case "$T3_LDD_VERSION" in
+      *musl* | *Musl* | *MUSL*) T3_LIBC_SUFFIX="-musl" ;;
+    esac
+    if [ -z "$T3_LIBC_SUFFIX" ]; then
+      for T3_MUSL_LOADER in /lib/ld-musl-*.so.1 /usr/lib/ld-musl-*.so.1; do
+        if [ -e "$T3_MUSL_LOADER" ]; then
+          T3_LIBC_SUFFIX="-musl"
+          break
+        fi
+      done
+    fi
+  fi
+  T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH$T3_LIBC_SUFFIX.tar.gz"
   T3_STAGING="$(mktemp -d "$HOME/.t3/runtime/versions/.staging-XXXXXX")"
   trap 'rm -rf "$T3_STAGING" "$T3_LOCK"' EXIT
   t3_fetch() {

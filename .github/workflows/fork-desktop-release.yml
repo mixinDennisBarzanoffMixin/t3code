@@ -109,7 +109,7 @@ jobs:
 
       - name: Run fleet regression tests
         run: |
-          vp test run apps/desktop/src/ssh/DesktopSshPasswordPrompts.test.ts packages/ssh/src/tunnel.test.ts
+          vp test run apps/desktop/src/ssh/DesktopSshPasswordPrompts.test.ts packages/ssh/src/tunnel.test.ts scripts/build-cli-archive.test.ts
           vp test run scripts/build-desktop-artifact.test.ts -t "ad-hoc signs unsigned macOS builds"
 
       - name: Build desktop bundle
@@ -172,6 +172,73 @@ jobs:
       resource_key: linux-x64
       cli_archive: true
 
+  linux_x64_musl:
+    name: Build Alpine/musl x64 runtime
+    needs: [metadata, build_bundle]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout selected commit
+        shell: bash
+        env:
+          SOURCE_REF: ${{ needs.metadata.outputs.ref }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git sparse-checkout init --no-cone
+          printf '/*\n!/.repos/\n' > .git/info/sparse-checkout
+          git fetch --no-tags --depth=1 origin "$SOURCE_REF"
+          git checkout --detach FETCH_HEAD
+
+      - name: Download JS bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: js-bundle
+          path: apps
+
+      # Build inside Alpine rather than cross-linking on Ubuntu. The SEA
+      # executable, node-pty addon, fff binary, and resource monitor must all
+      # target musl; renaming the glibc archive would still fail at exec time.
+      - name: Build and smoke-test musl runtime in Alpine
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "$PWD:/work" \
+            --workdir /work \
+            --env RELEASE_VERSION \
+            node:26.8.2-alpine \
+            sh -euxc '
+              apk add --no-cache bash cargo g++ git linux-headers make musl-dev python3
+              npm install --global pnpm@11.10.0
+              pnpm install --frozen-lockfile --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
+              node scripts/update-release-package-versions.ts "$RELEASE_VERSION"
+              pnpm exec node apps/server/scripts/cli.ts build-exe --verbose
+              cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml
+              mkdir -p /tmp/cli-resource-monitor/linux-x64
+              cp native/resource-monitor/target/release/t3-resource-monitor /tmp/cli-resource-monitor/linux-x64/t3-resource-monitor
+              pnpm exec node scripts/build-cli-archive.ts \
+                --platform linux \
+                --arch x64 \
+                --libc musl \
+                --version "$RELEASE_VERSION" \
+                --resource-monitor-dir /tmp/cli-resource-monitor \
+                --output-dir release-cli-musl
+              node scripts/smoke-cli-archive.ts \
+                --archive release-cli-musl/*-linux-x64-musl.tar.gz \
+                --expect-version "$RELEASE_VERSION"
+            '
+
+      - name: Upload musl CLI archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cli-linux-x64-musl
+          path: release-cli-musl/*-linux-x64-musl.tar.gz
+          if-no-files-found: error
+
   windows_x64:
     name: Package Windows x64
     needs: [metadata, build_bundle, linux_x64]
@@ -196,7 +263,7 @@ jobs:
 
   publish:
     name: Publish fork prerelease
-    needs: [metadata, mac_arm64, linux_x64, windows_x64]
+    needs: [metadata, mac_arm64, linux_x64, linux_x64_musl, windows_x64]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

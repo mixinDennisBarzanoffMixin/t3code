@@ -121,7 +121,13 @@ describe("ssh tunnel scripts", () => {
       "T3_RELEASE_BASE_URL='https://github.com/pingdotgg/t3code/releases/download'",
     );
     assert.include(script, 'T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"');
-    assert.include(script, 'T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"');
+    assert.include(
+      script,
+      'T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH$T3_LIBC_SUFFIX.tar.gz"',
+    );
+    assert.include(script, 'T3_LDD_VERSION="$(ldd --version 2>&1 || true)"');
+    assert.include(script, '*musl* | *Musl* | *MUSL*) T3_LIBC_SUFFIX="-musl"');
+    assert.include(script, "/lib/ld-musl-*.so.1 /usr/lib/ld-musl-*.so.1");
     assert.include(script, "SHA256SUMS");
     assert.include(script, 'exec "$T3_RUNTIME_DIR/t3" "$@"');
     assert.notInclude(script, "npx");
@@ -758,12 +764,12 @@ describe("archive runner script", () => {
   const windowsHost = hostPlatform === "win32";
   const archiveVersion = "1.2.3-preview.20260911.4";
 
-  const runRunner = (home: string, runner: string) =>
+  const runRunner = (home: string, runner: string, path = process.env.PATH ?? "") =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const child = yield* spawner.spawn(
         ChildProcess.make("sh", [runner, "--version"], {
-          env: { PATH: process.env.PATH ?? "", HOME: home },
+          env: { PATH: path, HOME: home },
           extendEnv: false,
         }),
       );
@@ -793,11 +799,11 @@ describe("archive runner script", () => {
   // A fake "executable" that answers --version, packed the way the release
   // workflow packs the real archive: one top-level directory named after the
   // stem, checksummed in SHA256SUMS.
-  const makeMirror = Effect.fn("makeMirror")(function* (root: string) {
+  const makeMirror = Effect.fn("makeMirror")(function* (root: string, platformKey?: string) {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const platform = hostPlatform === "darwin" ? "darwin" : "linux";
     const arch = hostArch === "arm64" ? "arm64" : "x64";
-    const stem = `t3-${archiveVersion}-${platform}-${arch}`;
+    const stem = `t3-${archiveVersion}-${platformKey ?? `${platform}-${arch}`}`;
     const stage = `${root}/stage/${stem}`;
     const release = `${root}/mirror/v${archiveVersion}`;
     const script = [
@@ -812,6 +818,38 @@ describe("archive runner script", () => {
     assert.equal(Number(yield* child.exitCode), 0);
     return `file://${root}/mirror`;
   });
+
+  it.effect.skipIf(windowsHost)(
+    "selects the musl archive on Alpine-style Linux hosts",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-musl-runner-" });
+        const releaseBaseUrl = yield* makeMirror(root, "linux-x64-musl");
+        const runner = `${root}/run-t3.sh`;
+        const fakeBin = `${root}/fake-bin`;
+        const home = `${root}/home`;
+        yield* fs.makeDirectory(fakeBin, { recursive: true });
+        yield* fs.makeDirectory(home, { recursive: true });
+        yield* fs.writeFileString(
+          `${fakeBin}/uname`,
+          '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac\n',
+        );
+        yield* fs.writeFileString(`${fakeBin}/ldd`, '#!/bin/sh\necho "musl libc (x86_64)" >&2\n');
+        yield* fs.chmod(`${fakeBin}/uname`, 0o755);
+        yield* fs.chmod(`${fakeBin}/ldd`, 0o755);
+        yield* fs.writeFileString(
+          runner,
+          buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+        );
+
+        const result = yield* runRunner(home, runner, `${fakeBin}:${process.env.PATH ?? ""}`);
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.include(result.stdout, `t3 v${archiveVersion}`);
+        assert.isTrue(yield* fs.exists(`${home}/.t3/runtime/versions/${archiveVersion}/t3`));
+      }).pipe(Effect.provide(NodeServices.layer)),
+    30_000,
+  );
 
   it.effect.skipIf(windowsHost)(
     "installs once when several launches race, and reclaims stale locks",
