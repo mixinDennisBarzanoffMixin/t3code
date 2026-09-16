@@ -23,6 +23,7 @@ env:
   T3CODE_CLERK_JWT_TEMPLATE: t3-relay
   T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: hzxSgY2cH10sDU2r
   T3CODE_RELAY_URL: https://relay.t3.codes
+  T3CODE_SSH_RELEASE_BASE_URL: https://github.com/mixinDennisBarzanoffMixin/t3code/releases/download
 
 jobs:
   metadata:
@@ -58,7 +59,7 @@ jobs:
           short_sha="$(git rev-parse --short=9 HEAD)"
           {
             echo "version=$version"
-            echo "tag=fork-desktop-v$version"
+            echo "tag=v$version"
             echo "ref=$GITHUB_SHA"
             echo "short_sha=$short_sha"
           } >> "$GITHUB_OUTPUT"
@@ -114,6 +115,9 @@ jobs:
       - name: Build desktop bundle
         run: vp run build:desktop
 
+      - name: Verify fork SSH runtime origin is embedded
+        run: rg --fixed-strings "$T3CODE_SSH_RELEASE_BASE_URL" apps/desktop/dist-electron
+
       - name: Upload shared bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -144,7 +148,7 @@ jobs:
       arch: arm64
       rust_target: aarch64-apple-darwin
       resource_key: darwin-arm64
-      cli_archive: false
+      cli_archive: true
 
   linux_x64:
     name: Build Linux runtime for Windows WSL
@@ -205,6 +209,29 @@ jobs:
           merge-multiple: true
           path: release-assets
 
+      - name: Download remote CLI runtimes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: release-cli
+
+      - name: Stage remote runtimes and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          runtimes=(release-cli/*.tar.gz)
+          if (( ${#runtimes[@]} == 0 )); then
+            echo "No remote CLI runtime archives were downloaded." >&2
+            exit 1
+          fi
+          cp "${runtimes[@]}" release-assets/
+          (
+            cd release-assets
+            sha256sum -- * > SHA256SUMS
+          )
+
       - name: Publish GitHub prerelease
         shell: bash
         env:
@@ -215,7 +242,7 @@ jobs:
           USER_NOTES: ${{ inputs.release_notes }}
         run: |
           set -euo pipefail
-          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' \) -print0)
+          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.tar.gz' -o -name 'SHA256SUMS' \) -print0)
           if (( ${#assets[@]} == 0 )); then
             echo "No desktop release assets were downloaded." >&2
             exit 1

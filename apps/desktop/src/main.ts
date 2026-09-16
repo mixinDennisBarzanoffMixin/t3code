@@ -68,6 +68,8 @@ import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "./wsl/DesktopWslServerTree.ts";
 
+declare const __T3CODE_BUILD_SSH_RELEASE_BASE_URL__: string | undefined;
+
 const desktopEnvironmentLayer = Layer.unwrap(
   Effect.gen(function* () {
     const metadata = yield* Effect.service(ElectronApp.ElectronApp).pipe(
@@ -98,7 +100,14 @@ const resolveDesktopSshCliRunner = (
       nodeEngineRange: serverPackageJson.engines.node,
     };
   }
-  return { archiveVersion: environment.appVersion };
+  const releaseBaseUrl =
+    typeof __T3CODE_BUILD_SSH_RELEASE_BASE_URL__ === "undefined"
+      ? undefined
+      : __T3CODE_BUILD_SSH_RELEASE_BASE_URL__.trim() || undefined;
+  return {
+    archiveVersion: environment.appVersion,
+    ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
+  };
 };
 
 const desktopSshEnvironmentLayer = Layer.unwrap(

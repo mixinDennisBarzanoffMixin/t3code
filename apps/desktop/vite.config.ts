@@ -18,6 +18,9 @@ const publicConfigDefine = {
   __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),
+  __T3CODE_BUILD_SSH_RELEASE_BASE_URL__: JSON.stringify(
+    repoEnv.T3CODE_SSH_RELEASE_BASE_URL?.trim() ?? "",
+  ),
 };
 
 export default defineConfig({

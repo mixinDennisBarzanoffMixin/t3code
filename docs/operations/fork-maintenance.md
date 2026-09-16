@@ -32,11 +32,15 @@ Review the upstream changes and resolve conflicts without dropping fleet patches
 
 Run **Fork desktop release** from the GitHub Actions page on the reviewed commit. The workflow builds:
 
-- macOS arm64 DMG and ZIP;
+- macOS arm64 DMG, ZIP, and remote CLI runtime;
 - Windows x64 installer with the Linux x64 CLI embedded for WSL;
 - Linux x64 AppImage used to produce that CLI runtime.
 
-The workflow publishes these files as a GitHub prerelease in this fork. Install them manually. Do not turn on an updater feed until the fork also owns the matching server/CLI release path and platform signing credentials.
+The workflow publishes these files, the remote runtime archives, and `SHA256SUMS` as a GitHub
+prerelease under the canonical `v<version>` tag. Fork desktop builds embed this fork's release
+download URL, so SSH-managed environments install the exact matching runtime instead of requesting
+a nonexistent preview archive from upstream. Install desktop updates manually; the fork still does
+not publish an automatic updater feed.
 
 ## Inherited upstream workflows
 
