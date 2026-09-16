@@ -613,7 +613,7 @@ describe("EnvironmentSupervisor", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("resets retries when activation wakes a blocked connection", () =>
+  it.effect("does not retry blocked authentication when application activation wakes", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({
         prepare: (attempt) =>
@@ -638,6 +638,10 @@ describe("EnvironmentSupervisor", () => {
       );
 
       yield* harness.wake("application-active-reconnect");
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(harness.prepareCount)).toBe(2);
+
+      yield* supervisor.retryNow;
       yield* awaitState(
         supervisor.state,
         (state) => state.phase === "connected" && state.attempt === 1,

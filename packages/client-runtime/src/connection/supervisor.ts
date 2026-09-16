@@ -631,6 +631,33 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     ),
   );
 
+  const waitForBlockedSignal = Effect.fnUntraced(function* (
+    reason: ConnectionAttemptError["reason"],
+  ) {
+    for (;;) {
+      const next = yield* Queue.take(signals);
+      switch (next._tag) {
+        case "ConnectRequested":
+        case "RetryRequested":
+          return true;
+        case "DisconnectRequested":
+        case "NetworkChanged":
+          return false;
+        case "Wakeup":
+          if (next.reason === "credentials-changed") {
+            return true;
+          }
+          // Foregrounding the app can repair a stale transport, but it cannot
+          // repair rejected credentials. Retrying here reopens the same SSH
+          // password dialog every time the window becomes active.
+          if (reason !== "authentication") {
+            return ConnectionWakeups.isApplicationActiveWakeup(next.reason);
+          }
+          break;
+      }
+    }
+  });
+
   const run = Effect.fnUntraced(function* () {
     let failureCount = 0;
     let generation = 0;
@@ -703,8 +730,8 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           lastFailure: error,
           retryAt: null,
         });
-        const applicationActivated = yield* waitForSignal;
-        if (applicationActivated) {
+        const resetRetry = yield* waitForBlockedSignal(error.reason);
+        if (resetRetry) {
           resetRetryLadder();
         }
         continue;

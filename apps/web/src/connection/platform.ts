@@ -129,9 +129,30 @@ function clientMetadata() {
   });
 }
 
+function isSshAuthenticationFailure(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    /permission denied \((?:publickey|password|keyboard-interactive|hostbased|gssapi-with-mic)[^)]*\)/u.test(
+      normalized,
+    ) ||
+    /authentication failed/u.test(normalized) ||
+    /too many authentication failures/u.test(normalized)
+  );
+}
+
 function sshPreparationError(cause: unknown) {
   const message = cause instanceof Error ? cause.message : String(cause);
   if (message.toLowerCase().includes("cancel")) {
+    return new ConnectionBlockedError({
+      reason: "authentication",
+      detail: message,
+    });
+  }
+  // A rejected password is not a transient transport failure. Treating it as
+  // one makes the connection supervisor reopen the password dialog on every
+  // automatic retry (and after ordinary application-focus wakeups). Keep the
+  // environment blocked until the user explicitly retries instead.
+  if (isSshAuthenticationFailure(message)) {
     return new ConnectionBlockedError({
       reason: "authentication",
       detail: message,

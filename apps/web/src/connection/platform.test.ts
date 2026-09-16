@@ -1,4 +1,8 @@
 import {
+  ConnectionBlockedError,
+  ConnectionTransientError,
+} from "@t3tools/client-runtime/connection";
+import {
   AuthStandardClientScopes,
   EnvironmentId,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
@@ -28,11 +32,17 @@ const TARGET: DesktopSshEnvironmentTarget = {
 
 function makeBridge(
   calls: string[],
-  options?: { readonly failDescriptor?: boolean },
+  options?: {
+    readonly ensureError?: Error;
+    readonly failDescriptor?: boolean;
+  },
 ): DesktopBridge {
   return {
     ensureSshEnvironment: async (target: DesktopSshEnvironmentTarget) => {
       calls.push("ensure");
+      if (options?.ensureError !== undefined) {
+        throw options.ensureError;
+      }
       return {
         target,
         httpBaseUrl: "http://127.0.0.1:3201/",
@@ -93,6 +103,38 @@ describe("desktop SSH pairing", () => {
       ).pipe(Effect.flip);
 
       expect(calls).toEqual(["ensure", "descriptor"]);
+    }),
+  );
+
+  it.effect("blocks automatic reconnect after SSH rejects a password", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const error = yield* provisionDesktopSshEnvironment(
+        makeBridge(calls, {
+          ensureError: new Error("Permission denied (publickey,password,keyboard-interactive)."),
+        }),
+        TARGET,
+      ).pipe(Effect.flip);
+
+      expect(error).toBeInstanceOf(ConnectionBlockedError);
+      expect(error.reason).toBe("authentication");
+      expect(calls).toEqual(["ensure"]);
+    }),
+  );
+
+  it.effect("keeps non-authentication SSH setup failures retryable", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const error = yield* provisionDesktopSshEnvironment(
+        makeBridge(calls, {
+          ensureError: new Error("ssh: connect to host devbox port 22: Operation timed out"),
+        }),
+        TARGET,
+      ).pipe(Effect.flip);
+
+      expect(error).toBeInstanceOf(ConnectionTransientError);
+      expect(error.reason).toBe("remote-unavailable");
+      expect(calls).toEqual(["ensure"]);
     }),
   );
 });
