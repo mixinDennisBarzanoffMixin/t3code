@@ -311,6 +311,7 @@ interface ServerTab {
   readonly isolatedContext: boolean;
 
   readonly desktop: { readonly close: () => Promise<void> } | null;
+  readonly external: { readonly close: () => Promise<void> } | null;
   readonly profileId: string | undefined;
   readonly openerTabId: string | undefined;
 
@@ -496,6 +497,7 @@ const make = Effect.gen(function* () {
     { readonly agentId: string | null; promise?: Promise<ServerTab> }
   >();
 
+  const externalEndpoints = new Map<string, { endpoint: string; url?: string }>();
   const closedPendingTabs = new Set<string>();
   const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
   const closedSessions = new Set<string>();
@@ -756,6 +758,7 @@ const make = Effect.gen(function* () {
     for (const viewer of tab.viewers) viewer.push({ _tag: end });
     void tab.control.close().catch(constVoid);
     if (tab.desktop) void tab.desktop.close().catch(constVoid);
+    else if (tab.external) void tab.external.close().catch(constVoid);
     else void tab.page.close().catch(constVoid);
     if (tab.isolatedContext) void tab.page.context().close().catch(constVoid);
     void tab.recording?.encoder.close().catch(constVoid);
@@ -822,10 +825,16 @@ const make = Effect.gen(function* () {
   ): Promise<ServerTab> => {
     const adopted = adoptedPages.get(tabKey(snapshot.threadId, snapshot.tabId));
     adoptedPages.delete(tabKey(snapshot.threadId, snapshot.tabId));
+    const external = externalEndpoints.get(tabKey(snapshot.threadId, snapshot.tabId));
+    externalEndpoints.delete(tabKey(snapshot.threadId, snapshot.tabId));
+    const attached = external
+      ? await contexts.connectDebugPage(external.endpoint, external.url)
+      : undefined;
     const desktop =
-      adopted === undefined && (await desktopRenders(snapshot))
+      !attached && adopted === undefined && (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
         : null;
+    if (attached) opened.push(() => attached.browser.close());
     if (desktop) opened.push(desktop.close);
     // Otherwise a desktop that attaches late shows its own page, and the agent drives another.
     if (!desktop && desktopChannel.available) {
@@ -838,11 +847,13 @@ const make = Effect.gen(function* () {
     const isolatedContext =
       adopted === undefined &&
       desktop === null &&
+      !attached &&
       (snapshot.debug === true ||
         (snapshot.automationOwner !== undefined && snapshot.profileId === undefined) ||
         snapshot.profileId === INCOGNITO_BROWSER_PROFILE_ID);
     const context =
       adopted?.page.context() ??
+      attached?.page.context() ??
       desktop?.page.context() ??
       (await contexts.contextFor(
         snapshot.profileId ?? "default",
@@ -851,18 +862,20 @@ const make = Effect.gen(function* () {
       ));
     if (isolatedContext) opened.push(() => context.close());
     if (adopted?.page.isClosed()) throw new Error("The popup closed before it opened.");
-    if (!desktop) await prepareContext(context);
-    const page = adopted?.page ?? desktop?.page ?? (await context.newPage());
-    if (!desktop) opened.push(() => page.close());
+    if (!desktop && !attached) await prepareContext(context);
+    const page = adopted?.page ?? attached?.page ?? desktop?.page ?? (await context.newPage());
+    if (!desktop && !attached) opened.push(() => page.close());
     const cdp = await context.newCDPSession(page);
-    const endpoint = snapshot.debug ? contexts.debugEndpoint(context) : undefined;
+    const endpoint = snapshot.debug
+      ? (external?.endpoint ?? contexts.debugEndpoint(context))
+      : undefined;
     if (snapshot.debug && !endpoint) throw new Error("Debug browser endpoint is unavailable");
     const debug = endpoint ? new DebugBrowser(endpoint) : undefined;
     if (debug) await debug.watch(cdp);
     await installPdfDocumentNavigation(cdp);
     // The desktop's page is already a normal browser. A popup's first request
     // went out before it became a tab; everything after presents as Chrome.
-    if (!desktop) await presentAsChrome(cdp, host);
+    if (!desktop && !attached) await presentAsChrome(cdp, host);
     if (!desktop) await recordCopies(cdp);
     page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
@@ -893,6 +906,7 @@ const make = Effect.gen(function* () {
       },
       isolatedContext,
       desktop: desktop === null ? null : { close: desktop.close },
+      external: attached ? { close: () => attached.browser.close() } : null,
       profileId: snapshot.profileId,
       openerTabId: adopted?.openerTabId,
       downloads: [],
@@ -1039,11 +1053,12 @@ const make = Effect.gen(function* () {
     tabs.set(key, tab);
     reportLiveTabs();
     // A desktop page navigates on its own and can finish loading before these listeners attach.
-    if (desktop) void page.waitForLoadState("load").then(() => reportLoaded(tab), constVoid);
+    if (desktop || attached)
+      void page.waitForLoadState("load").then(() => reportLoaded(tab), constVoid);
     // Existing desktop and popup PDFs can start loading before interception attaches.
     if (
       snapshot.navStatus._tag === "Loading" &&
-      ((!adopted && !desktop) || isPdfAssetUrl(snapshot.navStatus.url))
+      ((!adopted && !desktop && !attached) || isPdfAssetUrl(snapshot.navStatus.url))
     ) {
       const options = { waitUntil: "commit", timeout: NAVIGATION_TIMEOUT_MS } as const;
       tab.initialNavigation = (
@@ -2061,15 +2076,26 @@ const make = Effect.gen(function* () {
             message:
               "This tab uses a different browser mode. Pass reuseExistingTab=false for a new debug or normal browser.",
           });
+        if (open.debugEndpoint && open.debug === false)
+          throw new ServerBrowserPage.ServerBrowserOperationError({
+            tag: "PreviewAutomationExecutionError",
+            message: "An IDE browser endpoint requires debug mode.",
+          });
+        if (existing && open.debugEndpoint && existing.debug?.endpoint !== open.debugEndpoint)
+          throw new ServerBrowserPage.ServerBrowserOperationError({
+            tag: "PreviewAutomationExecutionError",
+            message:
+              "The current tab uses another browser. Pass reuseExistingTab=false to connect the IDE browser.",
+          });
         const navigationTimeout = Math.min(request.timeoutMs, NAVIGATION_TIMEOUT_MS);
-        if (open.debug && open.profileId !== undefined)
+        if ((open.debug || open.debugEndpoint) && open.profileId !== undefined)
           throw new ServerBrowserPage.ServerBrowserOperationError({
             tag: "PreviewAutomationExecutionError",
             message: "Debug browsers use a separate temporary profile; omit profileId.",
           });
         const profileId = existing
           ? undefined
-          : open.debug
+          : open.debug || open.debugEndpoint
             ? INCOGNITO_BROWSER_PROFILE_ID
             : resolveOpenProfile(open.profileId);
         if (!existing) closeIdleAgentTabs();
@@ -2084,7 +2110,16 @@ const make = Effect.gen(function* () {
                 runtime: "server",
                 reveal: false,
                 automationOwner: request.agentSessionId,
-                ...(open.debug ? { debug: true } : {}),
+                ...(open.debug || open.debugEndpoint ? { debug: true } : {}),
+                ...(open.debugEndpoint
+                  ? {
+                      beforePublish: (snapshot: PreviewSessionSnapshot) =>
+                        externalEndpoints.set(tabKey(snapshot.threadId, snapshot.tabId), {
+                          endpoint: open.debugEndpoint!,
+                          ...(url ? { url } : {}),
+                        }),
+                    }
+                  : {}),
               },
               { reclaimIdleSlot: true },
             ),

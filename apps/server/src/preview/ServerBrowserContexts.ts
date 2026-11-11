@@ -292,6 +292,36 @@ export class ServerBrowserContexts {
     return { browser, page };
   }
 
+  async connectDebugPage(endpoint: string, url?: string) {
+    const address = new URL(endpoint);
+    if (
+      address.protocol !== "http:" ||
+      !["127.0.0.1", "localhost", "[::1]"].includes(address.hostname) ||
+      !address.port ||
+      address.username ||
+      address.password ||
+      address.pathname !== "/" ||
+      address.search ||
+      address.hash
+    )
+      throw new Error("The debug endpoint must be a loopback HTTP address with an explicit port.");
+    const browser = await loadPlaywright().chromium.connectOverCDP(address.origin, {
+      timeout: 5_000,
+    });
+    const pages = browser.contexts().flatMap((context) => context.pages());
+    const matches = url ? pages.filter((page) => page.url() === url) : pages;
+    if (matches.length !== 1) {
+      await browser.close().catch(constVoid);
+      throw new Error(
+        matches.length
+          ? "The IDE browser has multiple matching pages; close the extra pages before connecting."
+          : "The IDE browser has no matching page; open the application in it first.",
+      );
+    }
+    this.debugEndpoints.set(matches[0]!.context(), address.origin);
+    return { browser, page: matches[0]! };
+  }
+
   async clearProfile(profileId: string) {
     if (profileId === INCOGNITO_BROWSER_PROFILE_ID) return;
     const key = JSON.stringify([profileId, null]);

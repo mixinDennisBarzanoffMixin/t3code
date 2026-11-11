@@ -56,3 +56,28 @@ it("allows an external IDE session to resume a managed debug browser without ter
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
 });
+
+it("adopts the selected page of an IDE browser without closing it", async () => {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-debug-test-"));
+  const pool = new ServerBrowserContexts({
+    profilesDir: directory,
+    executable: async () => chromium.executablePath(),
+  });
+  try {
+    const context = await pool.contextFor("default", "external", true);
+    const page = await context.newPage();
+    await page.goto("data:text/html,ide-browser");
+    const endpoint = pool.debugEndpoint(context)!;
+    await expect(pool.connectDebugPage("http://example.com:1234")).rejects.toThrow("loopback");
+    await expect(pool.connectDebugPage(endpoint, "data:text/html,missing")).rejects.toThrow(
+      "no matching page",
+    );
+    const attached = await pool.connectDebugPage(endpoint, "data:text/html,ide-browser");
+    expect(await attached.page.title()).toBe("");
+    await attached.browser.close();
+    expect(await page.evaluate("6 * 7")).toBe(42);
+  } finally {
+    await pool.close();
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+});

@@ -67,6 +67,12 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async scratchPage() {
       return makeEncoderPage() as unknown as Page;
     }
+    async connectDebugPage(endpoint: string, url?: string) {
+      const context = makeContext(undefined, url ?? desktopPageUrl);
+      context.page.viewportSize.mockReturnValue(null);
+      desktopConnections.push({ endpoint, context });
+      return { browser: { close: async () => {} }, page: context.page as unknown as Page };
+    }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext(undefined, desktopPageUrl);
       context.page.viewportSize.mockReturnValue(null);
@@ -2265,6 +2271,18 @@ it.live(
           { profileId: "profile-work", isolated: false },
           { profileId: "incognito", isolated: true },
         ]);
+        const attached = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: {
+            debugEndpoint: "http://127.0.0.1:45678",
+            url: "https://example.test/",
+            reuseExistingTab: false,
+            open: false,
+          },
+        });
+        expect(attached.debug).toEqual({ endpoint: "http://127.0.0.1:45678", paused: false });
+        expect(desktopConnections.at(-1)?.endpoint).toBe("http://127.0.0.1:45678");
         const debug = yield* broker.invoke<PreviewAutomationStatus>({
           scope,
           operation: "open",

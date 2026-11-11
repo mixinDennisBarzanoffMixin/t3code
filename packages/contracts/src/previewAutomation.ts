@@ -138,6 +138,10 @@ export const PreviewAutomationDialogInput = Schema.Struct({
 export type PreviewAutomationDialogInput = typeof PreviewAutomationDialogInput.Type;
 
 export const PreviewAutomationOpenInput = Schema.Struct({
+  debugEndpoint: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))).annotate({
+    description:
+      "Use an existing loopback Chromium debugging endpoint and its open page, such as a browser started by an IDE.",
+  }),
   debug: Schema.optional(Schema.Boolean).annotate({
     description:
       "Explicitly launch an isolated debug browser with a loopback CDP endpoint for an IDE. Default false.",
