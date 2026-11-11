@@ -2272,6 +2272,7 @@ it.live(
         });
         expect(debug.debug).toEqual({ endpoint: "http://127.0.0.1:45678", paused: false });
         const live = contexts.at(-1)!;
+        live.page.title.mockImplementation(() => new Promise<string>(() => {}));
         live.sessions[0]!.emit("Debugger.paused");
         const paused = yield* broker.invoke<PreviewAutomationStatus>({
           scope,

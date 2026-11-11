@@ -612,6 +612,7 @@ const make = Effect.gen(function* () {
     const generation = tab.navigationGeneration;
     const title = (await tab.page.title().catch(() => "")).slice(0, 512);
     if (tab.navigationGeneration !== generation || tab.loading || tab.page.url() !== url) return;
+    if (tab.debug) tab.debug.title = title;
     report(tab, {
       _tag: "Success",
       url: ServerBrowserPage.withoutDataPayload(url).slice(0, 2048),
@@ -1681,10 +1682,7 @@ const make = Effect.gen(function* () {
       return {
         ...status,
         debug: { endpoint: tab.debug.endpoint, paused: tab.debug.paused },
-        title:
-          tab.debug.paused || tab.dialog || status.url === null
-            ? null
-            : (await tab.page.title().catch(() => "")) || null,
+        title: tab.debug.title || null,
       };
     if (status.url === null || tab.dialog) return status;
     return { ...status, title: (await tab.page.title().catch(() => "")) || null };

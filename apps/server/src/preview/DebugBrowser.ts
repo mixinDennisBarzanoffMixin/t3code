@@ -3,6 +3,7 @@ import type { CDPSession } from "playwright-core";
 import { ServerBrowserOperationError } from "./ServerBrowserPage.ts";
 
 export class DebugBrowser {
+  title = "";
   private readonly stopped = new Set<CDPSession>();
   private controller = new AbortController();
 
