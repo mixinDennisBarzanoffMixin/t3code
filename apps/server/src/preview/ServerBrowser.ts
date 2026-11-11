@@ -290,6 +290,28 @@ interface Recording {
   readonly framesInFlight: Set<Promise<void>>;
 }
 
+interface ExternalLease {
+  readonly close: () => Promise<void>;
+  readonly retain: () => ExternalLease;
+}
+
+const externalLease = (dispose: () => Promise<void>): ExternalLease => {
+  let count = 0;
+  const retain = (): ExternalLease => {
+    count++;
+    let active = true;
+    return {
+      retain,
+      close: async () => {
+        if (!active) return;
+        active = false;
+        if (--count === 0) await dispose();
+      },
+    };
+  };
+  return retain();
+};
+
 interface ServerTab {
   readonly threadId: ThreadId;
   readonly tabId: string;
@@ -311,7 +333,7 @@ interface ServerTab {
   readonly isolatedContext: boolean;
 
   readonly desktop: { readonly close: () => Promise<void> } | null;
-  readonly external: { readonly close: () => Promise<void> } | null;
+  readonly external: ExternalLease | null;
   readonly profileId: string | undefined;
   readonly openerTabId: string | undefined;
 
@@ -498,8 +520,12 @@ const make = Effect.gen(function* () {
   >();
 
   const externalEndpoints = new Map<string, { endpoint: string; url?: string }>();
+  const externalTargets = new Set<string>();
   const closedPendingTabs = new Set<string>();
-  const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const adoptedPages = new Map<
+    string,
+    { readonly page: Page; readonly openerTabId: string; readonly external?: ExternalLease }
+  >();
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
@@ -830,11 +856,23 @@ const make = Effect.gen(function* () {
     const attached = external
       ? await contexts.connectDebugPage(external.endpoint, external.url)
       : undefined;
+    const target =
+      attached && external ? `${new URL(external.endpoint).origin}:${attached.id}` : undefined;
+    if (target && externalTargets.has(target)) {
+      await attached?.browser.close().catch(constVoid);
+      throw new Error("This IDE browser page is already open in T3; reuse its existing tab.");
+    }
+    if (target) externalTargets.add(target);
+    const release = async () => {
+      if (target) externalTargets.delete(target);
+      await attached?.browser.close().catch(constVoid);
+    };
+    const lease = attached ? externalLease(release) : adopted?.external;
     const desktop =
       !attached && adopted === undefined && (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
         : null;
-    if (attached) opened.push(() => attached.browser.close());
+    if (lease) opened.push(lease.close);
     if (desktop) opened.push(desktop.close);
     // Otherwise a desktop that attaches late shows its own page, and the agent drives another.
     if (!desktop && desktopChannel.available) {
@@ -906,7 +944,7 @@ const make = Effect.gen(function* () {
       },
       isolatedContext,
       desktop: desktop === null ? null : { close: desktop.close },
-      external: attached ? { close: () => attached.browser.close() } : null,
+      external: lease ?? null,
       profileId: snapshot.profileId,
       openerTabId: adopted?.openerTabId,
       downloads: [],
@@ -1375,6 +1413,7 @@ const make = Effect.gen(function* () {
       return;
     }
     const url = popup.url();
+    const external = opener.external?.retain();
 
     const controller = [...opener.viewers].find(
       (viewer) => viewer.id === opener.control.controller,
@@ -1393,6 +1432,7 @@ const make = Effect.gen(function* () {
           adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
             page: popup,
             openerTabId: opener.tabId,
+            ...(external ? { external } : {}),
           }),
       }),
     ).then(
@@ -1400,6 +1440,7 @@ const make = Effect.gen(function* () {
         if (opener.control.agentId === null) controller?.push({ _tag: "popup", tabId: tab.tabId });
       },
       async () => {
+        await external?.close().catch(constVoid);
         await popup.close().catch(constVoid);
       },
     );

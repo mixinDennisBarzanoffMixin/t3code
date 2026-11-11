@@ -318,8 +318,20 @@ export class ServerBrowserContexts {
           : "The IDE browser has no matching page; open the application in it first.",
       );
     }
-    this.debugEndpoints.set(matches[0]!.context(), address.origin);
-    return { browser, page: matches[0]! };
+    const page = matches[0]!;
+    try {
+      const session = await page.context().newCDPSession(page);
+      try {
+        const target = await session.send("Target.getTargetInfo");
+        this.debugEndpoints.set(page.context(), address.origin);
+        return { browser, page, id: target.targetInfo.targetId };
+      } finally {
+        await session.detach();
+      }
+    } catch (cause) {
+      await browser.close().catch(constVoid);
+      throw cause;
+    }
   }
 
   async clearProfile(profileId: string) {
