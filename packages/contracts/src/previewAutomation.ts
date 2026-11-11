@@ -72,6 +72,7 @@ export const PreviewAutomationProfile = Schema.Struct({
 export type PreviewAutomationProfile = typeof PreviewAutomationProfile.Type;
 
 export const PreviewAutomationStatus = Schema.Struct({
+  debug: Schema.optional(Schema.Struct({ endpoint: Schema.String, paused: Schema.Boolean })),
   available: Schema.Boolean,
   visible: Schema.Boolean,
   tabId: Schema.NullOr(PreviewTabId),
@@ -137,6 +138,10 @@ export const PreviewAutomationDialogInput = Schema.Struct({
 export type PreviewAutomationDialogInput = typeof PreviewAutomationDialogInput.Type;
 
 export const PreviewAutomationOpenInput = Schema.Struct({
+  debug: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Explicitly launch an isolated debug browser with a loopback CDP endpoint for an IDE. Default false.",
+  }),
   ...PreviewAutomationTabTargetFields,
   url: Schema.optional(BoundedUrl).annotate({
     description: `First page URL. ${URL_GUIDANCE} Omit to open a blank tab.`,

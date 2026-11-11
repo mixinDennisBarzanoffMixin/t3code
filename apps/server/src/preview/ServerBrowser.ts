@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
 // Screencasts ignore emulated device scale; real 2x keeps captures sharp.
 // --disable-gpu uses cheaper software compositing while preserving SwiftShader WebGL.
+import { DebugBrowser } from "./DebugBrowser.ts";
 import {
   BUILT_IN_BROWSER_PROFILES,
   DEFAULT_BROWSER_PROFILE_ID,
@@ -294,6 +295,7 @@ interface ServerTab {
   readonly tabId: string;
   readonly page: Page;
   readonly cdp: CDPSession;
+  readonly debug?: DebugBrowser;
   readonly frameSessions: Map<Frame, CDPSession>;
   readonly createdAt: number;
   usedAt: number;
@@ -835,7 +837,8 @@ const make = Effect.gen(function* () {
     const isolatedContext =
       adopted === undefined &&
       desktop === null &&
-      ((snapshot.automationOwner !== undefined && snapshot.profileId === undefined) ||
+      (snapshot.debug === true ||
+        (snapshot.automationOwner !== undefined && snapshot.profileId === undefined) ||
         snapshot.profileId === INCOGNITO_BROWSER_PROFILE_ID);
     const context =
       adopted?.page.context() ??
@@ -843,6 +846,7 @@ const make = Effect.gen(function* () {
       (await contexts.contextFor(
         snapshot.profileId ?? "default",
         isolatedContext ? tabKey(snapshot.threadId, snapshot.tabId) : undefined,
+        snapshot.debug,
       ));
     if (isolatedContext) opened.push(() => context.close());
     if (adopted?.page.isClosed()) throw new Error("The popup closed before it opened.");
@@ -850,6 +854,10 @@ const make = Effect.gen(function* () {
     const page = adopted?.page ?? desktop?.page ?? (await context.newPage());
     if (!desktop) opened.push(() => page.close());
     const cdp = await context.newCDPSession(page);
+    const endpoint = snapshot.debug ? contexts.debugEndpoint(context) : undefined;
+    if (snapshot.debug && !endpoint) throw new Error("Debug browser endpoint is unavailable");
+    const debug = endpoint ? new DebugBrowser(endpoint) : undefined;
+    if (debug) await debug.watch(cdp);
     await installPdfDocumentNavigation(cdp);
     // The desktop's page is already a normal browser. A popup's first request
     // went out before it became a tab; everything after presents as Chrome.
@@ -867,6 +875,7 @@ const make = Effect.gen(function* () {
       page,
       cdp,
       frameSessions: new Map(),
+      ...(debug ? { debug } : {}),
       createdAt: Date.now(),
       usedAt: Date.now(),
       viewers: new Set(),
@@ -1301,6 +1310,7 @@ const make = Effect.gen(function* () {
       return;
     }
     tab.frameSessions.set(frame, cdp);
+    if (tab.debug) await tab.debug.watch(cdp);
     cdp.on("close", () => {
       if (tab.frameSessions.get(frame) !== cdp) return;
       tab.frameSessions.delete(frame);
@@ -1358,6 +1368,7 @@ const make = Effect.gen(function* () {
         threadId: opener.threadId,
         ...(/^https?:/i.test(url) ? { url } : {}),
         runtime: "server",
+        ...(opener.debug ? { debug: true } : {}),
         ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
         ...(opener.control.agentId === null
           ? {}
@@ -1666,6 +1677,15 @@ const make = Effect.gen(function* () {
         completedAt,
       })),
     };
+    if (tab.debug)
+      return {
+        ...status,
+        debug: { endpoint: tab.debug.endpoint, paused: tab.debug.paused },
+        title:
+          tab.debug.paused || tab.dialog || status.url === null
+            ? null
+            : (await tab.page.title().catch(() => "")) || null,
+      };
     if (status.url === null || tab.dialog) return status;
     return { ...status, title: (await tab.page.title().catch(() => "")) || null };
   };
@@ -2037,8 +2057,23 @@ const make = Effect.gen(function* () {
           found && (request.tabIdExplicit || found.control.agentId === request.agentSessionId)
             ? found
             : undefined;
+        if (existing && open.debug !== undefined && open.debug !== Boolean(existing.debug))
+          throw new ServerBrowserPage.ServerBrowserOperationError({
+            tag: "PreviewAutomationExecutionError",
+            message:
+              "This tab uses a different browser mode. Pass reuseExistingTab=false for a new debug or normal browser.",
+          });
         const navigationTimeout = Math.min(request.timeoutMs, NAVIGATION_TIMEOUT_MS);
-        const profileId = existing ? undefined : resolveOpenProfile(open.profileId);
+        if (open.debug && open.profileId !== undefined)
+          throw new ServerBrowserPage.ServerBrowserOperationError({
+            tag: "PreviewAutomationExecutionError",
+            message: "Debug browsers use a separate temporary profile; omit profileId.",
+          });
+        const profileId = existing
+          ? undefined
+          : open.debug
+            ? INCOGNITO_BROWSER_PROFILE_ID
+            : resolveOpenProfile(open.profileId);
         if (!existing) closeIdleAgentTabs();
         const tab =
           existing ??
@@ -2051,10 +2086,12 @@ const make = Effect.gen(function* () {
                 runtime: "server",
                 reveal: false,
                 automationOwner: request.agentSessionId,
+                ...(open.debug ? { debug: true } : {}),
               },
               { reclaimIdleSlot: true },
             ),
           ));
+        existing?.debug?.signal.throwIfAborted();
         if (existing?.dialog)
           throw new BrowserControlInterrupted({
             message:
@@ -2094,7 +2131,7 @@ const make = Effect.gen(function* () {
                 }),
               );
             }
-            if (!existing && url) {
+            if (!existing && url && !tab.debug) {
               await tab.page
                 .waitForLoadState("load", { timeout: navigationTimeout })
                 .catch(constVoid);
@@ -2209,6 +2246,11 @@ const make = Effect.gen(function* () {
   };
 
   const executeTabOperation = async (tab: ServerTab, request: PreviewAutomationRequest) => {
+    if (tab.debug) return tab.debug.run(() => executeUnpausedOperation(tab, request));
+    return executeUnpausedOperation(tab, request);
+  };
+
+  const executeUnpausedOperation = async (tab: ServerTab, request: PreviewAutomationRequest) => {
     const input = request.input;
     switch (request.operation) {
       case "navigate": {
@@ -2292,6 +2334,7 @@ const make = Effect.gen(function* () {
           tab.cdp,
           input as PreviewAutomationEvaluateInput,
           request.timeoutMs,
+          tab.debug?.signal,
         );
       case "waitFor":
         return ServerBrowserPage.waitFor(tab.page, input as PreviewAutomationWaitForInput);

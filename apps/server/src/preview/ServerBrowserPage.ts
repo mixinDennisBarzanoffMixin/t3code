@@ -888,14 +888,21 @@ export const evaluate = async (
   cdp: CDPSession,
   input: PreviewAutomationEvaluateInput,
   timeoutMs: number,
+  signal?: AbortSignal,
 ) => {
+  signal?.throwIfAborted();
+  let abort: () => void = () => {};
+  const paused = new Promise<never>((_, reject) => {
+    abort = () => reject(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   const expired = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
       // Stops a busy script; an awaited promise is abandoned and settles unread.
-      void cdp.send("Runtime.terminateExecution").catch(constVoid);
+      if (!signal?.aborted) void cdp.send("Runtime.terminateExecution").catch(constVoid);
       reject(
         new ServerBrowserOperationError({
           tag: "PreviewAutomationTimeoutError",
@@ -923,7 +930,10 @@ export const evaluate = async (
       : classic;
   });
   void evaluation.catch(constVoid);
-  const result = await Promise.race([evaluation, expired]).finally(() => clearTimeout(timer));
+  const result = await Promise.race([evaluation, expired, paused]).finally(() => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  });
   if (result.exceptionDetails) {
     throw new ServerBrowserOperationError({
       tag: "PreviewAutomationExecutionError",

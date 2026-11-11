@@ -162,6 +162,7 @@ export const PreviewSessionSnapshot = Schema.Struct({
   runtime: Schema.optional(PreviewRuntime),
   /** The server runs this tab in headless Chromium, so the desktop streams it like other clients. */
   headless: Schema.optional(Schema.Boolean),
+  debug: Schema.optional(Schema.Boolean),
   automationOwner: Schema.optional(Schema.String),
   reveal: Schema.optional(Schema.Boolean),
   revealRequest: Schema.optional(Schema.Struct({ id: Schema.String, force: Schema.Boolean })),
@@ -170,6 +171,7 @@ export const PreviewSessionSnapshot = Schema.Struct({
 export type PreviewSessionSnapshot = typeof PreviewSessionSnapshot.Type;
 
 export const PreviewOpenInput = Schema.Struct({
+  debug: Schema.optional(Schema.Boolean),
   threadId: ThreadId,
   url: Schema.optional(Url),
   viewport: Schema.optional(PreviewViewportSetting),

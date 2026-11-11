@@ -79,6 +79,9 @@ export const presentAsChrome = async (
 export class ServerBrowserContexts {
   private readonly options: Options;
   private readonly contexts = new Map<string, Promise<BrowserContext>>();
+  private readonly debugDirectories = new Set<string>();
+  private readonly debugCleanup = new Set<Promise<void>>();
+  private readonly debugEndpoints = new WeakMap<BrowserContext, string>();
   private readonly clearing = new Map<string, Promise<void>>();
   private browser: Promise<Browser> | undefined;
   private closing: Promise<void> | undefined;
@@ -171,14 +174,14 @@ export class ServerBrowserContexts {
     await browser.close().catch(constVoid);
   }
 
-  contextFor(profileId: string, isolationKey?: string): Promise<BrowserContext> {
+  contextFor(profileId: string, isolationKey?: string, debug = false): Promise<BrowserContext> {
     if (this.closing) return Promise.reject(new Error("The preview browser is closed."));
-    const key = JSON.stringify([profileId, isolationKey ?? null]);
+    const key = JSON.stringify([profileId, isolationKey ?? null, ...(debug ? [true] : [])]);
     const cached = this.contexts.get(key);
     if (cached) return cached;
     const cleared = this.clearing.get(key)?.catch(constVoid) ?? Promise.resolve();
     const pending = cleared
-      .then(() => this.createContext(profileId, isolationKey))
+      .then(() => this.createContext(profileId, isolationKey, debug))
       .then(async (context) => {
         context.on("close", () => {
           if (this.contexts.get(key) === pending) this.contexts.delete(key);
@@ -198,8 +201,54 @@ export class ServerBrowserContexts {
     return pending;
   }
 
-  private async createContext(profileId: string, isolationKey?: string) {
+  debugEndpoint(context: BrowserContext) {
+    return this.debugEndpoints.get(context);
+  }
+
+  private async createContext(profileId: string, isolationKey?: string, debug = false) {
     const contextOptions = { viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2 };
+    if (debug) {
+      await NodeFSP.mkdir(this.options.profilesDir, { recursive: true });
+      const directory = await NodeFSP.mkdtemp(NodePath.join(this.options.profilesDir, "debug-"));
+      this.debugDirectories.add(directory);
+      let context: BrowserContext | undefined;
+      try {
+        const { executable, ...options } = await this.launchOptions();
+        const { chromium } = loadPlaywright();
+        context = await this.launch(executable, (executablePath) =>
+          chromium.launchPersistentContext(directory, {
+            ...options,
+            ...contextOptions,
+            args: [
+              ...options.args,
+              "--remote-debugging-address=127.0.0.1",
+              "--remote-debugging-port=0",
+            ],
+            executablePath,
+          }),
+        );
+        const port = Number(
+          (await NodeFSP.readFile(NodePath.join(directory, "DevToolsActivePort"), "utf8")).split(
+            "\n",
+          )[0],
+        );
+        if (!Number.isInteger(port) || port < 1 || port > 65535)
+          throw new Error("Chromium did not report a debug port");
+        this.debugEndpoints.set(context, `http://127.0.0.1:${port}`);
+        context.on("close", () => {
+          const cleanup = Promise.resolve(context?.browser()?.close()).then(() =>
+            NodeFSP.rm(directory, { recursive: true, force: true }),
+          );
+          this.debugCleanup.add(cleanup);
+          void cleanup.finally(() => this.debugCleanup.delete(cleanup)).catch(constVoid);
+        });
+        return context;
+      } catch (cause) {
+        await context?.close().catch(constVoid);
+        await NodeFSP.rm(directory, { recursive: true, force: true });
+        throw cause;
+      }
+    }
     if (isolationKey !== undefined || profileId === INCOGNITO_BROWSER_PROFILE_ID) {
       return this.sharedContext(contextOptions);
     }
@@ -277,6 +326,14 @@ export class ServerBrowserContexts {
     );
     const browser = await this.browser?.catch(() => undefined);
     await browser?.close().catch(constVoid);
+    await Promise.allSettled(this.debugCleanup);
+    // Chromium may flush preferences after its context-close event.
+    await Promise.allSettled(
+      [...this.debugDirectories].map((directory) =>
+        NodeFSP.rm(directory, { recursive: true, force: true }),
+      ),
+    );
+    this.debugDirectories.clear();
     this.contexts.clear();
   }
 }

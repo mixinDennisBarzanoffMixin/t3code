@@ -61,6 +61,9 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
       contexts.push(context);
       return context as unknown as BrowserContext;
     }
+    debugEndpoint() {
+      return "http://127.0.0.1:45678";
+    }
     async scratchPage() {
       return makeEncoderPage() as unknown as Page;
     }
@@ -2262,6 +2265,37 @@ it.live(
           { profileId: "profile-work", isolated: false },
           { profileId: "incognito", isolated: true },
         ]);
+        const debug = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { debug: true, reuseExistingTab: false, open: false },
+        });
+        expect(debug.debug).toEqual({ endpoint: "http://127.0.0.1:45678", paused: false });
+        const live = contexts.at(-1)!;
+        live.sessions[0]!.emit("Debugger.paused");
+        const paused = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: debug.tabId!,
+          operation: "status",
+          input: {},
+        });
+        expect(paused.debug?.paused).toBe(true);
+        const blocked = yield* broker
+          .invoke({ scope, tabId: debug.tabId!, operation: "evaluate", input: { expression: "1" } })
+          .pipe(Effect.exit);
+        expect(Exit.isFailure(blocked)).toBe(true);
+        const mismatch = yield* broker
+          .invoke({ scope, tabId: debug.tabId!, operation: "open", input: { debug: false } })
+          .pipe(Effect.exit);
+        expect(Exit.isFailure(mismatch)).toBe(true);
+        live.sessions[0]!.emit("Debugger.resumed");
+        const continued = yield* broker.invoke({
+          scope,
+          tabId: debug.tabId!,
+          operation: "evaluate",
+          input: { expression: "1" },
+        });
+        expect(continued).toBe("evaluated");
         expect(byDefault).toMatchObject({
           defaultProfileId: "profile-work",
           profiles: [
