@@ -70,8 +70,13 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async connectDebugPage(endpoint: string, url?: string) {
       const context = makeContext(undefined, url ?? desktopPageUrl);
       context.page.viewportSize.mockReturnValue(null);
-      desktopConnections.push({ endpoint, context });
-      return { browser: { close: async () => {} }, page: context.page as unknown as Page };
+      const close = vi.fn(async () => {});
+      desktopConnections.push({ endpoint, context, close });
+      return {
+        browser: { close },
+        page: context.page as unknown as Page,
+        id: "ide-page",
+      };
     }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext(undefined, desktopPageUrl);
@@ -336,7 +341,11 @@ let desktopAttachWaiting = Promise.withResolvers<void>();
 const shownDesktopTabs = new Set<string>();
 const releasedDesktopTabs: Array<string> = [];
 const desktopTurns = new NodeEvents.EventEmitter();
-const desktopConnections: Array<{ endpoint: string; context: ReturnType<typeof makeContext> }> = [];
+const desktopConnections: Array<{
+  endpoint: string;
+  context: ReturnType<typeof makeContext>;
+  close?: ReturnType<typeof vi.fn>;
+}> = [];
 const testThread = {
   threadId: ThreadId.make("browser-test-thread"),
   providerSessionId: "agent-a",
@@ -2283,6 +2292,19 @@ it.live(
         });
         expect(attached.debug).toEqual({ endpoint: "http://127.0.0.1:45678", paused: false });
         expect(desktopConnections.at(-1)?.endpoint).toBe("http://127.0.0.1:45678");
+        const duplicate = yield* broker
+          .invoke({
+            scope,
+            operation: "open",
+            input: {
+              debugEndpoint: "http://127.0.0.1:45678",
+              url: "https://example.test/",
+              reuseExistingTab: false,
+              open: false,
+            },
+          })
+          .pipe(Effect.exit);
+        expect(Exit.isFailure(duplicate)).toBe(true);
         const debug = yield* broker.invoke<PreviewAutomationStatus>({
           scope,
           operation: "open",
@@ -2480,6 +2502,44 @@ it.live.each([
         input: {},
       });
       expect(status.tabs).toHaveLength(limit);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an IDE browser remains connected while its popup is still open in T3", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const parent = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: {
+          debugEndpoint: "http://127.0.0.1:45678",
+          url: "https://example.test/",
+          reuseExistingTab: false,
+          open: false,
+        },
+      });
+      const connection = desktopConnections.at(-1)!;
+      const events = yield* manager.subscribeEvents;
+      const popup = makeContext(undefined, "https://example.test/popup");
+      connection.context.page.emit("popup", popup.page);
+      let opened = yield* PubSub.take(events);
+      while (opened.type !== "opened") opened = yield* PubSub.take(events);
+      const child = PreviewTabId.make(opened.tabId);
+      yield* broker.invoke({ scope, tabId: parent.tabId!, operation: "close", input: {} });
+      expect(connection.close).not.toHaveBeenCalled();
+      expect(
+        yield* broker.invoke({
+          scope,
+          tabId: child,
+          operation: "evaluate",
+          input: { expression: "1" },
+        }),
+      ).toBe("evaluated");
+      yield* broker.invoke({ scope, tabId: child, operation: "close", input: {} });
+      expect(connection.close).toHaveBeenCalledOnce();
     }),
   ).pipe(Effect.provide(layer)),
 );

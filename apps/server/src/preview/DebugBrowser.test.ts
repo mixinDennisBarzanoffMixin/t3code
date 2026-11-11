@@ -72,6 +72,12 @@ it("adopts the selected page of an IDE browser without closing it", async () => 
     await expect(pool.connectDebugPage(endpoint, "data:text/html,missing")).rejects.toThrow(
       "no matching page",
     );
+    const duplicate = await context.newPage();
+    await duplicate.goto("data:text/html,ide-browser");
+    await expect(pool.connectDebugPage(endpoint, "data:text/html,ide-browser")).rejects.toThrow(
+      "multiple matching pages",
+    );
+    await duplicate.close();
     const attached = await pool.connectDebugPage(endpoint, "data:text/html,ide-browser");
     expect(await attached.page.title()).toBe("");
     await attached.browser.close();
