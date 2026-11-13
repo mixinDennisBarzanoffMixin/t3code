@@ -331,6 +331,7 @@ interface ServerTab {
   readonly onFileChooser: (chooser: FileChooser) => void;
 
   readonly isolatedContext: boolean;
+  readonly browser: "desktop" | "server" | "external";
 
   readonly desktop: { readonly close: () => Promise<void> } | null;
   readonly external: ExternalLease | null;
@@ -524,7 +525,12 @@ const make = Effect.gen(function* () {
   const closedPendingTabs = new Set<string>();
   const adoptedPages = new Map<
     string,
-    { readonly page: Page; readonly openerTabId: string; readonly external?: ExternalLease }
+    {
+      readonly page: Page;
+      readonly openerTabId: string;
+      readonly browser: ServerTab["browser"];
+      readonly external?: ExternalLease;
+    }
   >();
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
@@ -869,9 +875,16 @@ const make = Effect.gen(function* () {
     };
     const lease = attached ? externalLease(release) : adopted?.external;
     const desktop =
-      !attached && adopted === undefined && (await desktopRenders(snapshot))
+      snapshot.browser !== "server" &&
+      !attached &&
+      adopted === undefined &&
+      (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
         : null;
+    if (snapshot.browser === "desktop" && !desktop && !adopted)
+      throw new Error(
+        "The requested desktop browser did not attach. Open the tab in the T3 desktop app connected to its own environment; no server browser was substituted.",
+      );
     if (lease) opened.push(lease.close);
     if (desktop) opened.push(desktop.close);
     // Otherwise a desktop that attaches late shows its own page, and the agent drives another.
@@ -943,6 +956,7 @@ const make = Effect.gen(function* () {
           .catch(constVoid);
       },
       isolatedContext,
+      browser: adopted ? adopted.browser : lease ? "external" : desktop ? "desktop" : "server",
       desktop: desktop === null ? null : { close: desktop.close },
       external: lease ?? null,
       profileId: snapshot.profileId,
@@ -1432,6 +1446,7 @@ const make = Effect.gen(function* () {
           adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
             page: popup,
             openerTabId: opener.tabId,
+            browser: opener.browser,
             ...(external ? { external } : {}),
           }),
       }),
@@ -1683,6 +1698,7 @@ const make = Effect.gen(function* () {
     if (!tab) {
       return {
         available: false,
+        browsers: desktopChannel.available ? ["server", "desktop"] : ["server"],
         visible: false,
         tabId: null,
         url: null,
@@ -1695,6 +1711,8 @@ const make = Effect.gen(function* () {
     const viewport = tab.desktop ? await layoutSize(tab) : tab.page.viewportSize();
     const status = {
       available: true,
+      browser: tab.browser,
+      browsers: desktopChannel.available ? (["server", "desktop"] as const) : (["server"] as const),
       visible: isVisible(tab),
       tabId: tab.tabId,
       url: url === "about:blank" ? null : url,
@@ -2111,6 +2129,27 @@ const make = Effect.gen(function* () {
           found && (request.tabIdExplicit || found.control.agentId === request.agentSessionId)
             ? found
             : undefined;
+        if (
+          (open.browser !== undefined && open.debugEndpoint) ||
+          (open.browser === "desktop" && open.debug)
+        )
+          throw new ServerBrowserPage.ServerBrowserOperationError({
+            tag: "PreviewAutomationExecutionError",
+            message:
+              "browser selects a built-in desktop or server browser; omit it when attaching debugEndpoint. Desktop selection cannot launch an isolated debug browser.",
+          });
+        if (open.browser === "desktop" && !desktopChannel.available)
+          throw new ServerBrowserPage.ServerBrowserOperationError({
+            tag: "PreviewAutomationExecutionError",
+            message:
+              "No desktop browser channel is connected to this environment. Use the T3 desktop app's own environment, or supply a reachable Chromium debugEndpoint; no server browser was substituted.",
+          });
+        if (existing && open.browser && existing.browser !== open.browser)
+          throw new ServerBrowserPage.ServerBrowserOperationError({
+            tag: "PreviewAutomationExecutionError",
+            message:
+              "The current tab uses another browser. Pass reuseExistingTab=false to open the selected browser without changing this tab.",
+          });
         if (existing && open.debug !== undefined && open.debug !== Boolean(existing.debug))
           throw new ServerBrowserPage.ServerBrowserOperationError({
             tag: "PreviewAutomationExecutionError",
@@ -2149,6 +2188,7 @@ const make = Effect.gen(function* () {
                 ...(url ? { url } : {}),
                 ...(profileId === undefined ? {} : { profileId }),
                 runtime: "server",
+                ...(open.browser === undefined ? {} : { browser: open.browser }),
                 reveal: false,
                 automationOwner: request.agentSessionId,
                 ...(open.debug || open.debugEndpoint ? { debug: true } : {}),

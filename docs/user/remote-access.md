@@ -244,6 +244,8 @@ directly. Every other device, and the desktop app for other environments,
 streams them from the host. Agents keep using them while no device is
 connected, and `localhost` addresses reach servers on the host.
 
+Agents can select the embedded desktop browser or headless server browser when opening a tab. Desktop selection requires the desktop app's own environment and fails if that browser cannot attach; it does not substitute a server browser. Existing external Chromium browsers can be attached through a CDP endpoint reachable from the environment. This does not discover or launch your system browser or guarantee third-party sign-in support.
+
 The first tab downloads a headless Chrome, about 120 MB, into the T3 home. It
 is the same browser [HTML renders](html-renders.md) use, so a host downloads it
 only once. Some Linux hosts need [setup](#browser-host-setup) before it can

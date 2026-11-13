@@ -5,6 +5,7 @@ import {
   PREVIEW_VIEWPORT_MAX_AREA,
   PreviewRenderedViewportSize,
   PreviewTabId,
+  PreviewRuntime,
   PreviewViewportPresetId,
   PreviewViewportSetting,
   PreviewViewportSize,
@@ -72,6 +73,8 @@ export const PreviewAutomationProfile = Schema.Struct({
 export type PreviewAutomationProfile = typeof PreviewAutomationProfile.Type;
 
 export const PreviewAutomationStatus = Schema.Struct({
+  browser: Schema.optional(Schema.Literals(["desktop", "server", "external"])),
+  browsers: Schema.optional(Schema.Array(PreviewRuntime)),
   debug: Schema.optional(Schema.Struct({ endpoint: Schema.String, paused: Schema.Boolean })),
   available: Schema.Boolean,
   visible: Schema.Boolean,
@@ -138,9 +141,13 @@ export const PreviewAutomationDialogInput = Schema.Struct({
 export type PreviewAutomationDialogInput = typeof PreviewAutomationDialogInput.Type;
 
 export const PreviewAutomationOpenInput = Schema.Struct({
+  browser: Schema.optional(PreviewRuntime).annotate({
+    description:
+      "Select desktop (T3's embedded desktop browser) or server (headless Chromium). See browsers in preview_status. An unavailable desktop fails; it never falls back to server. Omit to retain current behavior.",
+  }),
   debugEndpoint: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))).annotate({
     description:
-      "Use an existing loopback Chromium debugging endpoint and its open page, such as a browser started by an IDE.",
+      "Attach an existing Chrome/Edge/Chromium browser through its loopback CDP endpoint, including IDE-launched browsers. The endpoint must be reachable from this environment; this does not launch or discover desktop Chrome.",
   }),
   debug: Schema.optional(Schema.Boolean).annotate({
     description:

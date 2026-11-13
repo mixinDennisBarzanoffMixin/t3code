@@ -193,6 +193,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         viewport: input.viewport ?? FILL_PREVIEW_VIEWPORT,
         ...(input.profileId === undefined ? {} : { profileId: input.profileId }),
         ...(runtime === undefined ? {} : { runtime }),
+        ...(input.browser === undefined ? {} : { browser: input.browser }),
+        ...(input.browser === "server" ? { headless: true } : {}),
         ...(runtime === "server" && input.automationOwner !== undefined
           ? { automationOwner: input.automationOwner }
           : {}),

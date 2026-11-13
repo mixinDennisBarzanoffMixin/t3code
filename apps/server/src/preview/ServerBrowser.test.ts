@@ -616,6 +616,73 @@ it.live("an initial download stays available after preview_open reports the navi
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("explicit browser selection never substitutes a headless browser for a desktop", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const before = yield* manager.list({ threadId: scope.thread.threadId });
+      const error = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browser: "desktop", reuseExistingTab: false, open: false },
+        })
+        .pipe(Effect.flip);
+      expect(error.message).toContain("desktop");
+      expect(contexts).toHaveLength(1);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual(
+        before.sessions,
+      );
+
+      desktopRendersNext = true;
+      const desktop = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browser: "desktop", reuseExistingTab: false, open: false },
+      });
+      expect(desktop).toMatchObject({ browser: "desktop" });
+      expect(desktopConnections).toHaveLength(1);
+
+      for (const input of [
+        { browser: "desktop", debug: true },
+        { browser: "server", debugEndpoint: "http://127.0.0.1:45678" },
+      ]) {
+        const conflict = yield* broker
+          .invoke<PreviewAutomationStatus>({
+            scope,
+            operation: "open",
+            input: { ...input, reuseExistingTab: false },
+          })
+          .pipe(Effect.flip);
+        expect(conflict.message).toContain("browser selects");
+      }
+      expect(contexts).toHaveLength(1);
+
+      desktopRendersNext = true;
+      const server = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browser: "server", reuseExistingTab: false, open: false },
+      });
+      expect(server).toMatchObject({ browser: "server" });
+      expect(desktopConnections).toHaveLength(1);
+      expect(contexts).toHaveLength(2);
+      const mismatch = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: PreviewTabId.make(server.tabId!),
+          operation: "open",
+          input: { browser: "desktop", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(mismatch.message).toContain("reuseExistingTab=false");
+      expect(contexts).toHaveLength(2);
+      expect(desktopConnections).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each(["desktop" as const, undefined])(
   "explicit desktop targets ($0 runtime) fail without creating a server tab",
   (runtime) =>
@@ -2528,6 +2595,9 @@ it.live("an IDE browser remains connected while its popup is still open in T3", 
       let opened = yield* PubSub.take(events);
       while (opened.type !== "opened") opened = yield* PubSub.take(events);
       const child = PreviewTabId.make(opened.tabId);
+      expect(
+        yield* broker.invoke({ scope, tabId: child, operation: "status", input: {} }),
+      ).toMatchObject({ browser: "external" });
       yield* broker.invoke({ scope, tabId: parent.tabId!, operation: "close", input: {} });
       expect(connection.close).not.toHaveBeenCalled();
       expect(
